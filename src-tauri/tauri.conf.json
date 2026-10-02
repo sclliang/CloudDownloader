@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "CloudDownloader",
+  "version": "0.3.1",
+  "identifier": "com.sixunited.clouddownloader",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "CloudDownloader · 云盘下载器",
+        "width": 1180,
+        "height": 790,
+        "minWidth": 920,
+        "minHeight": 650,
+        "center": true,
+        "dragDropEnabled": true,
+        "additionalBrowserArgs": "--force-renderer-accessibility",
+        "backgroundColor": "#F6F8FB"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "copyright": "Copyright (c) 2026 sixunited. Author: Sclliang",
+    "externalBin": ["binaries/aria2c"],
+    "resources": ["../third-party/notices/*"],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false,
+        "languages": ["SimpChinese"]
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

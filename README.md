@@ -1,0 +1,97 @@
+# CloudDownloader · 云盘下载器
+
+Windows 网盘文件与传输工具，使用 Tauri 2、Vue 3 / TypeScript、Rust 和 aria2。当前版本 0.3.1，支持夸克和百度分享下载，以及百度个人网盘文件浏览、上传、下载和创建分享。
+
+## 使用
+
+1. 从 [GitHub Releases](https://github.com/sclliang/CloudDownloader/releases) 下载并安装 `CloudDownloader_0.3.1_x64-setup.exe`，或解压便携 ZIP。本地构建产物位于 `release/`。
+2. 打开「账号管理」，选择网盘，在各自官方窗口自行扫码或完成验证码登录。
+3. 回到主窗口，粘贴一个分享链接或完整分享文字。软件自动识别网盘和提取码。
+4. 点击「解析链接」，浏览目录、选择文件或文件夹，确认保存目录后下载。
+5. 任务支持暂停、继续、重试。重新启动后，未完成任务保持暂停；继续时重新取得下载地址。
+
+需要 Windows 10/11 x64 和 Microsoft Edge WebView2 Runtime。安装包会检查运行时；便携版需系统已安装运行时。便携版须保留 `CloudDownloader.exe`、`aria2c.exe` 和随附文件，不能只复制主程序。
+
+## 百度「我的网盘」
+
+- 复用百度官方网页登录状态，不需要开放平台 API Key。打开「我的网盘」可进入文件夹、使用路径栏、分页加载和搜索当前目录及子目录。
+- 选择文件或文件夹直接下载到本地；文件夹会递归展开，任务归入原下载队列。恢复下载时核对账号、文件 ID、大小与校验信息。
+- 在目标文件夹点击「上传文件」，一次最多选择 100 个本地文件。确认文件列表、目标目录和并发数后开始。支持创建目标文件夹。
+- 可从资源管理器将本地文件拖到「我的网盘」当前目录、列表中的文件夹或路径导航中的文件夹。拖动时高亮目标并显示完整路径，松开即加入上传队列；默认每文件 4 路并发。同样支持一次最多 100 个文件，暂不支持拖入本地文件夹。
+- 上传使用 4 MiB 分片，每文件可选 1、2、4、8 路并发；最多 2 个文件同时传输，所有任务共用 8 路并发上限。失败分片重试最多 3 次（共 4 次尝试），每次核对分片 MD5。
+- 进度按百度确认的分片计算，显示速度和估算剩余时间。支持暂停、继续、重试和移除记录；重启后未完成任务保持暂停。恢复时重新校验本地文件，并向百度查询同一上传会话仍缺少的分片。上传会话失效时需要重新上传。
+- 同名文件会提示更名或选择其他目录，不会自动覆盖。任务绑定创建时的百度账号，账号切换或本地文件变化会阻止继续上传。
+- 点击「创建分享」，确认所选文件、1/7/30 天或永久有效期和 4 位提取码；成功后可复制链接。永久链接在分享记录中显示「永久有效」，不会因时间推移被标记为过期。在「分享记录」中可取消本程序创建的分享，网盘文件会保留。
+- 「分享记录」是本机记录，不同步其他客户端创建的分享；外部取消等状态以百度页面为准。
+
+当前上传支持选择多个文件；文件夹整体上传、自动同步和网盘文件删除不在此版本中。
+
+## 账号与下载
+
+- 两个网盘使用独立的 WebView2 登录资料，下载任务标注来源。
+- 支持目录分页、文件夹递归下载、同名文件编号、Windows 文件名清理。
+- 最多同时下载 3 个文件，每个文件最多使用 4 个连接。
+- 记录保存在 SQLite；账号 Cookie 和临时下载地址不写入任务记录。
+- 密码和验证码只在官方页面中输入。网页登录会话只用于对应网盘的请求。
+- 下载引擎只监听本机，每次启动使用随机 RPC 密钥，并随主程序退出。
+- 移除任务会停止下载并移除记录，已经下载到本地的文件会保留。
+
+实际速度、会员权限、分享有效期、验证码和是否允许分享直接下载由网盘服务端决定。程序不会自动转存或删除云盘文件。当前适配网页接口，并非各网盘承诺稳定的公开 SDK，接口变化可能需要更新。各网盘实际验证进展见 `VERIFICATION.md`。
+
+## 从 QuarkDownloader 迁移
+
+首次运行且新资料目录不存在时，程序使用 SQLite 备份接口复制旧数据库（包含 WAL 中的数据），并复制夸克登录资料。完整复制后再启用新目录，原资料保留。旧任务视为夸克任务，下载目录和未完成文件的位置不变。
+
+升级前请关闭旧版 QuarkDownloader。迁移完成后使用新版继续下载；不要同时运行两个版本操作同一下载文件。
+
+- 新登录资料和数据库：`%APPDATA%\com.sixunited.clouddownloader\`
+- 旧资料保留：`%APPDATA%\com.sixunited.quarkdownloader\`
+- 全新安装的默认下载目录：`%USERPROFILE%\Downloads\CloudDownloader\`
+- 迁移用户继续使用原先选择的下载目录。
+- `.aria2` 文件保存续传信息，任务完成前请保留。
+
+## 开发与构建
+
+环境：Windows x64、Node.js、Rust MSVC、Visual Studio C++ Build Tools、WebView2 Runtime。
+
+```powershell
+npm ci
+npm run tauri dev -- --no-watch
+```
+
+实际账号验证时使用 `--no-watch`，避免编辑 Rust 源码时重启登录窗口。普通开发可移除该选项。
+
+关闭开发版后运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build.ps1
+```
+
+脚本执行格式检查、Rust 测试、前端和 Tauri 发布构建，生成 NSIS 安装包和便携 ZIP。产物位于 `release/`。
+
+```powershell
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+```
+
+测试包含真实 aria2 与本地 HTTP Range 服务的暂停、引擎重启、更换地址续传和逐字节一致性验证，以及上传分片重试、源文件变化检测、检查点恢复、旧数据库迁移、网盘识别、错误处理、下载域名边界和 Windows 文件名处理。真实百度上传、续传、下载和分享的验证结果见 `VERIFICATION.md`；自动测试不会使用网盘账号。
+
+## 目录
+
+- `src/`：Vue 界面与样式。
+- `src-tauri/src/providers/`：多网盘路由与百度接口。
+- `src-tauri/src/quark.rs`：夸克接口。
+- `src-tauri/src/session.rs`：独立登录窗口、后台会话读取。
+- `src-tauri/src/migration.rs`：旧资料迁移。
+- `src-tauri/src/lib.rs`：任务调度和 Tauri 命令。
+- `src-tauri/src/engine.rs`：aria2 进程、RPC 和传输测试。
+- `src-tauri/src/store.rs`：SQLite 持久化。
+- `src-tauri/src/providers/baidu_drive.rs`：百度个人网盘、上传与分享接口。
+- `src-tauri/src/drive_commands.rs`：个人文件和上传任务命令。
+- `src-tauri/src/upload.rs`：分片并发、重试、暂停续传和文件校验。
+- `src-tauri/src/verification.rs`：仅开发构建启用的真实账号验证程序；只上传生成的测试文件。
+- `third-party/notices/`：第三方许可资料。
+
+aria2 的固定版本和校验值见 `third-party/notices/README.txt`。本项目未复制或运行 LinkSwift 脚本。
