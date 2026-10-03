@@ -14,6 +14,8 @@ pub fn start(app: tauri::AppHandle, mode: String) {
             let listing = session.drive_list("/", 1, "").await?;
             Ok::<_, String>(json!({ "rootCount": listing.files.len(), "hasMore": listing.has_more, "authenticated": !listing.account_id.is_empty() }))
         }.await
+        } else if mode == "--verify-baidu-download-probe" {
+            download_probe(&app).await
         } else if mode == "--verify-baidu-checks" {
             extra_checks(&app).await
         } else if mode == "--verify-baidu-permanent-share" {
@@ -24,7 +26,9 @@ pub fn start(app: tauri::AppHandle, mode: String) {
         let dir = output_dir();
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(
-            dir.join(if mode == "--verify-baidu-permanent-share" {
+            dir.join(if mode == "--verify-baidu-download-probe" {
+                "baidu-download-probe.json"
+            } else if mode == "--verify-baidu-permanent-share" {
                 "baidu-permanent-share.json"
             } else if mode == "--verify-baidu-checks" {
                 "baidu-checks.json"
@@ -48,6 +52,266 @@ fn output_dir() -> PathBuf {
 }
 fn record_step(step: &str) {
     let _ = std::fs::write(output_dir().join("current-step.txt"), step);
+}
+
+// Read-only cloud verification; the optional engine check uses an isolated local
+// directory and does not insert, edit, or delete user task records.
+async fn download_probe(app: &tauri::AppHandle) -> Result<Value, String> {
+    let name = std::env::var("CLOUD_VERIFY_DOWNLOAD_NAME")
+        .map_err(|_| "Set CLOUD_VERIFY_DOWNLOAD_NAME to the explicitly requested file")?;
+    let session = session::connect(app, Provider::Baidu).await?;
+    let listing = session.drive_list("/", 1, &name).await?;
+    let files: Vec<_> = listing
+        .files
+        .into_iter()
+        .filter(|f| !f.is_dir && f.name == name)
+        .collect();
+    if files.len() != 1 {
+        return Err(format!("Expected one matching file; found {}", files.len()));
+    }
+    let file = files.into_iter().next().unwrap();
+    if file.size < 1024 {
+        return Err("Probe requires at least 1024 bytes".into());
+    }
+    let source = OwnSource {
+        account_id: listing.account_id,
+        file,
+    };
+    let descriptor = session.drive_download(&source).await?;
+    let mut offsets = vec![0];
+    if source.file.size > (1_u64 << 32) + 1024 {
+        offsets.push(1_u64 << 32);
+    }
+    offsets.push(source.file.size - 1024);
+    let mut ranges = Vec::new();
+    for offset in offsets {
+        ranges
+            .push(download_range_probe(&session, &descriptor.url, source.file.size, offset).await?);
+    }
+    let engine = if std::env::var("CLOUD_VERIFY_DOWNLOAD_ENGINE").as_deref() == Ok("1") {
+        Some(download_engine_probe(&session, &source).await?)
+    } else {
+        None
+    };
+    Ok(json!({"name":source.file.name,"size":source.file.size,"ranges":ranges,"engine":engine}))
+}
+
+async fn download_range_probe(
+    session: &crate::providers::Session,
+    address: &str,
+    size: u64,
+    offset: u64,
+) -> Result<Value, String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(25))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut current = url::Url::parse(address).map_err(|_| "Invalid download URL")?;
+    let end = offset + 1023;
+    let expected = format!("bytes {offset}-{end}/{size}");
+    let mut hops = Vec::new();
+    for _ in 0..8 {
+        // Validate each redirect and select cookies for that destination's domain.
+        let descriptor = session.download_descriptor(current.to_string())?;
+        let mut request = client
+            .get(current.clone())
+            .header("User-Agent", descriptor.user_agent)
+            .header("Range", format!("bytes={offset}-{end}"))
+            .header("Accept-Encoding", "identity");
+        for header in &descriptor.headers {
+            if let Some((key, value)) = header.split_once(':') {
+                request = request.header(key.trim(), value.trim());
+            }
+        }
+        let mut response = request
+            .send()
+            .await
+            .map_err(|_| "Download probe connection failed")?;
+        let status = response.status();
+        hops.push(json!({"host":current.host_str(),"status":status.as_u16()}));
+        if status.is_redirection() {
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or("Redirect without location")?;
+            current = current.join(location).map_err(|_| "Invalid redirect")?;
+            continue;
+        }
+        let content_range = response
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        if status.as_u16() != 206 || content_range != expected {
+            return Err(format!(
+                "Range probe failed at {offset}: HTTP {}, range {content_range}",
+                status.as_u16()
+            ));
+        }
+        let mut bytes = 0;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "Download probe body failed")?
+        {
+            bytes += chunk.len();
+            if bytes > 1024 {
+                return Err("Range response exceeded requested length".into());
+            }
+        }
+        if bytes != 1024 {
+            return Err("Range response was incomplete".into());
+        }
+        return Ok(json!({"offset":offset,"contentRange":content_range,"bytes":bytes,"hops":hops}));
+    }
+    Err("Too many download redirects".into())
+}
+
+async fn download_engine_probe(
+    session: &crate::providers::Session,
+    source: &OwnSource,
+) -> Result<Value, String> {
+    let directory = output_dir().join(format!("download-probe-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    let mut engine = Some(crate::engine::Engine::start()?);
+    let result = async {
+        let rpc = engine.as_ref().unwrap().rpc.clone();
+        engine_probe_ready(&rpc).await?;
+        // Bound network and disk usage. HTTP range probes separately verify >4 GiB
+        // and EOF offsets; here the real engine verifies startup and checkpoint reuse.
+        let first = session.drive_download(source).await?;
+        let gid = rpc
+            .add(
+                &first.url,
+                &directory.to_string_lossy(),
+                "sample.bin",
+                &first.headers,
+                first.user_agent,
+            )
+            .await?;
+        engine_probe_progress(&rpc, &gid, source.file.size, 1024 * 1024).await?;
+        rpc.call("aria2.forcePause", vec![json!(gid)]).await?;
+        let mut paused = 0;
+        for _ in 0..40 {
+            let value = rpc
+                .call(
+                    "aria2.tellStatus",
+                    vec![json!(gid), json!(["status", "completedLength"])],
+                )
+                .await?;
+            if value["status"] == "paused" {
+                paused = value["completedLength"]
+                    .as_str()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if paused == 0 {
+            return Err("Engine did not pause".to_string());
+        }
+        drop(engine.take());
+        if !directory.join("sample.bin.aria2").is_file() {
+            return Err("Resume checkpoint missing".into());
+        }
+        engine = Some(crate::engine::Engine::start()?);
+        let rpc = engine.as_ref().unwrap().rpc.clone();
+        engine_probe_ready(&rpc).await?;
+        let fresh = session.drive_download(source).await?;
+        let resumed = rpc
+            .add(
+                &fresh.url,
+                &directory.to_string_lossy(),
+                "sample.bin",
+                &fresh.headers,
+                fresh.user_agent,
+            )
+            .await?;
+        let progress =
+            engine_probe_progress(&rpc, &resumed, source.file.size, paused + 1024 * 1024).await?;
+        rpc.call("aria2.forcePause", vec![json!(resumed)]).await?;
+        Ok::<_, String>(json!({"totalLength":source.file.size,"pausedBytes":paused,
+            "resumedBytes":progress,"refreshedLink":true,"engineRestarted":true,"temporaryTaskOnly":true}))
+    }
+    .await;
+    drop(engine);
+    // This fresh UUID directory belongs only to this opt-in probe.
+    let directory = directory.canonicalize().map_err(|e| e.to_string())?;
+    let root = output_dir().canonicalize().map_err(|e| e.to_string())?;
+    if directory.parent() != Some(root.as_path()) {
+        return Err("Probe cleanup target is outside the verification directory".into());
+    }
+    std::fs::remove_dir_all(&directory).map_err(|e| format!("Probe cleanup failed: {e}"))?;
+    result
+}
+
+async fn engine_probe_ready(rpc: &crate::engine::Rpc) -> Result<(), String> {
+    for _ in 0..50 {
+        if rpc.call("aria2.getVersion", vec![]).await.is_ok() {
+            rpc.call(
+                "aria2.changeGlobalOption",
+                vec![json!({
+                    "split":"1","max-connection-per-server":"1","max-download-limit":"1M"
+                })],
+            )
+            .await?;
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err("Probe engine did not start".into())
+}
+
+async fn engine_probe_progress(
+    rpc: &crate::engine::Rpc,
+    gid: &str,
+    size: u64,
+    minimum: u64,
+) -> Result<u64, String> {
+    for _ in 0..240 {
+        let value = rpc
+            .call(
+                "aria2.tellStatus",
+                vec![
+                    json!(gid),
+                    json!([
+                        "status",
+                        "totalLength",
+                        "completedLength",
+                        "errorCode",
+                        "errorMessage"
+                    ]),
+                ],
+            )
+            .await?;
+        if value["status"] == "error" {
+            return Err(crate::download_errors::message(
+                value["errorCode"].as_str().unwrap_or_default(),
+                value["errorMessage"].as_str().unwrap_or_default(),
+                false,
+            ));
+        }
+        let total = value["totalLength"]
+            .as_str()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let completed = value["completedLength"]
+            .as_str()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        if total != 0 && total != size {
+            return Err("Engine total size differs".into());
+        }
+        if completed >= minimum {
+            return Ok(completed);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Err("Engine transfer timed out".into())
 }
 
 async fn permanent_share_check(app: &tauri::AppHandle) -> Result<Value, String> {

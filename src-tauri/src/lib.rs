@@ -1,5 +1,6 @@
 mod direct;
 mod direct_commands;
+mod download_errors;
 mod drive_commands;
 mod engine;
 mod migration;
@@ -452,7 +453,8 @@ async fn poll_engine(app: tauri::AppHandle) {
                             "completedLength",
                             "downloadSpeed",
                             "connections",
-                            "errorCode"
+                            "errorCode",
+                            "errorMessage"
                         ]),
                     ],
                 )
@@ -479,18 +481,11 @@ async fn poll_engine(app: tauri::AppHandle) {
             }
             if task.status == "error" {
                 let code = value["errorCode"].as_str().unwrap_or("未知");
-                task.error = match code {
-                    "3" | "22" | "24" if task.direct.is_some() => {
-                        "文件链接已失效或需要权限，请获取有效直链后新建任务".into()
-                    }
-                    "8" if task.direct.is_some() => {
-                        "服务器无法续传此文件，请获取新链接后重新下载".into()
-                    }
-                    "3" | "22" | "24" => "下载地址可能已失效，点击重试将重新解析地址".into(),
-                    "9" => "磁盘空间不足，请释放空间后重试".into(),
-                    "13" => "文件已存在，请检查下载目录".into(),
-                    _ => format!("下载中断（错误 {code}），可点击重试继续"),
-                };
+                task.error = download_errors::message(
+                    code,
+                    value["errorMessage"].as_str().unwrap_or_default(),
+                    task.direct.is_some(),
+                );
             }
             let store = state.store.lock().unwrap();
             if store

@@ -1,6 +1,5 @@
 use super::{number, text, Download, Session};
 use crate::model::*;
-use base64::Engine;
 use reqwest::multipart::{Form, Part};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -76,29 +75,24 @@ pub fn parse_file(v: &Value) -> Result<DriveFile, String> {
     })
 }
 
-// The web protocol signs its download request with RC4(sign3, sign1), then base64.
-// Implement the algorithm locally; never evaluate server-provided JavaScript.
-fn web_sign(key: &[u8], input: &[u8]) -> Result<String, String> {
-    if key.is_empty() || input.is_empty() {
-        return Err("百度下载签名缺失，请在官方窗口刷新登录状态".into());
+fn metadata_download_link<'a>(data: &'a Value, expected: &DriveFile) -> Result<&'a str, String> {
+    let rows = data["info"].as_array().ok_or("百度文件信息不完整")?;
+    if rows.len() != 1 {
+        return Err("百度未返回唯一的文件信息，请刷新文件列表".into());
     }
-    let mut state = std::array::from_fn::<_, 256, _>(|i| i as u8);
-    let mut j = 0usize;
-    for i in 0..256 {
-        j = (j + state[i] as usize + key[i % key.len()] as usize) % 256;
-        state.swap(i, j);
+    let fresh = parse_file(&rows[0])?;
+    if fresh.is_dir
+        || fresh.id != expected.id
+        || fresh.path != expected.path
+        || fresh.size != expected.size
+        || (!expected.md5.is_empty() && fresh.md5 != expected.md5)
+    {
+        return Err("网盘源文件已变化，请刷新列表并创建新下载任务".into());
     }
-    let (mut i, mut j) = (0usize, 0usize);
-    let output: Vec<u8> = input
-        .iter()
-        .map(|b| {
-            i = (i + 1) % 256;
-            j = (j + state[i] as usize) % 256;
-            state.swap(i, j);
-            b ^ state[(state[i] as usize + state[j] as usize) % 256]
-        })
-        .collect();
-    Ok(base64::engine::general_purpose::STANDARD.encode(output))
+    rows[0]["dlink"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or("百度未返回下载地址，请在官方窗口检查下载权限".into())
 }
 
 impl Session {
@@ -208,20 +202,7 @@ impl Session {
     }
 
     pub async fn drive_meta(&self, paths: &[String]) -> Result<Vec<DriveFile>, String> {
-        if paths.is_empty() || paths.len() > 100 {
-            return Err("一次最多选择 100 项".into());
-        }
-        for path in paths {
-            remote_path(path)?;
-        }
-        let data = check(
-            self.json(
-                self.baidu_get("/api/filemetas")
-                    .query(&[("target", json!(paths).to_string()), ("dlink", "0".into())]),
-            )
-            .await?,
-        )?;
-        data["info"]
+        self.drive_meta_response(paths, false).await?["info"]
             .as_array()
             .ok_or("百度文件信息不完整")?
             .iter()
@@ -229,48 +210,34 @@ impl Session {
             .collect()
     }
 
-    pub async fn drive_download(&self, source: &OwnSource) -> Result<Download, String> {
-        let identity = self.baidu_identity(Some(&source.account_id)).await?;
-        let fresh = self
-            .drive_meta(std::slice::from_ref(&source.file.path))
-            .await?
-            .into_iter()
-            .next()
-            .ok_or("文件不存在")?;
-        if fresh.id != source.file.id
-            || fresh.size != source.file.size
-            || (!source.file.md5.is_empty() && fresh.md5 != source.file.md5)
-        {
-            return Err("网盘源文件已变化，请刷新列表并创建新下载任务".into());
+    async fn drive_meta_response(&self, paths: &[String], dlink: bool) -> Result<Value, String> {
+        if paths.is_empty() || paths.len() > 100 {
+            return Err("一次最多选择 100 项".into());
         }
-        let info = check(
+        for path in paths {
+            remote_path(path)?;
+        }
+        check(
             self.json(
-                self.baidu_get("/api/gettemplatevariable")
-                    .query(&[("fields", r#"["sign1","sign3","timestamp"]"#)]),
+                self.baidu_get("/api/filemetas")
+                    .header("Referer", "https://pan.baidu.com/disk/main")
+                    .query(&[
+                        ("target", json!(paths).to_string()),
+                        ("dlink", if dlink { "1" } else { "0" }.into()),
+                    ]),
             )
             .await?,
-        )?;
-        let sign = web_sign(
-            text(&info["result"]["sign3"]).as_bytes(),
-            text(&info["result"]["sign1"]).as_bytes(),
-        )?;
-        let data = check(
-            self.json(self.baidu_get("/api/download").query(&[
-                ("type", "dlink".into()),
-                (
-                    "fidlist",
-                    json!([fresh.id.parse::<u64>().map_err(|_| "文件 ID 无效")?]).to_string(),
-                ),
-                ("sign", sign),
-                ("timestamp", text(&info["result"]["timestamp"])),
-                ("bdstoken", identity.token),
-            ]))
-            .await?,
-        )?;
-        let link = data["dlink"][0]["dlink"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or("百度未返回下载地址，请在官方窗口检查下载权限")?;
+        )
+    }
+
+    pub async fn drive_download(&self, source: &OwnSource) -> Result<Download, String> {
+        self.baidu_identity(Some(&source.account_id)).await?;
+        // Fetch identity and a fresh link together. The legacy signed /api/download
+        // route can return already-expired URLs for files in the personal drive.
+        let data = self
+            .drive_meta_response(std::slice::from_ref(&source.file.path), true)
+            .await?;
+        let link = metadata_download_link(&data, &source.file)?;
         self.download_descriptor(link.into())
     }
 
@@ -494,12 +461,40 @@ impl Session {
 mod tests {
     use super::*;
     #[test]
-    fn rc4_protocol_vector_and_paths() {
-        assert_eq!(web_sign(b"Key", b"Plaintext").unwrap(), "u/MW6NlArwrT");
-        assert!(web_sign(b"", b"text").is_err());
+    fn remote_path_boundaries() {
         assert!(remote_path("/测试/文件.zip").is_ok());
         for path in ["relative", "/a/../b", "/a\\b", "/a\0b"] {
             assert!(remote_path(path).is_err());
+        }
+    }
+
+    #[test]
+    fn large_download_metadata_and_resume_identity() {
+        let row = json!({"fs_id":123456789012345_u64, "path":"/test/large.7z",
+            "size":7_348_134_959_u64, "isdir":0, "md5":"original",
+            "dlink":"https://d.pcs.baidu.com/file?sign=private"});
+        let expected = parse_file(&row).unwrap();
+        assert_eq!(expected.size, 7_348_134_959);
+        let data = json!({"info":[row.clone()]});
+        assert_eq!(
+            metadata_download_link(&data, &expected).unwrap(),
+            row["dlink"]
+        );
+        for (field, changed) in [
+            ("fs_id", json!(123)),
+            ("path", json!("/different/large.7z")),
+            ("size", json!(3_053_167_663_u64)),
+            ("md5", json!("changed")),
+            ("isdir", json!(1)),
+            ("dlink", json!("")),
+            ("dlink", Value::Null),
+        ] {
+            let mut data = data.clone();
+            data["info"][0][field] = changed;
+            assert!(metadata_download_link(&data, &expected).is_err(), "{field}");
+        }
+        for info in [json!([]), json!([row.clone(), row]), Value::Null] {
+            assert!(metadata_download_link(&json!({"info":info}), &expected).is_err());
         }
     }
 }
