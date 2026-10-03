@@ -1,3 +1,5 @@
+mod direct;
+mod direct_commands;
 mod drive_commands;
 mod engine;
 mod migration;
@@ -6,6 +8,7 @@ mod providers;
 mod quark;
 mod session;
 mod store;
+mod tray;
 mod upload;
 #[cfg(debug_assertions)]
 mod verification;
@@ -149,12 +152,32 @@ async fn start_task(
     app: &tauri::AppHandle,
     state: &AppState,
     mut task: Task,
+    prepared_direct: Option<direct::Metadata>,
 ) -> Result<Task, String> {
     task.status = "resolving".into();
     task.error.clear();
     task.speed = 0;
     state.store.lock().unwrap().save(&task)?;
     let result = async {
+        std::fs::create_dir_all(&task.directory)
+            .map_err(|_| "无法创建下载目录，请选择可写的文件夹")?;
+        if let Some(source) = &mut task.direct {
+            let metadata = match prepared_direct {
+                Some(metadata) => metadata,
+                None => direct::probe(&source.url).await?,
+            };
+            let partial = task.completed > 0
+                || PathBuf::from(&task.directory)
+                    .join(&task.name)
+                    .metadata()
+                    .is_ok_and(|m| m.len() > 0);
+            direct::update_source(source, task.size, partial, &metadata)?;
+            task.size = metadata.size;
+            task.file.size = metadata.size;
+            return rpc(state)?
+                .add_direct(source, &task.directory, &task.name)
+                .await;
+        }
         let session = session::connect(app, task.share.provider).await?;
         session.account().await?;
         let download = if let Some(source) = &task.own {
@@ -173,8 +196,6 @@ async fn start_task(
                 .download(&task.share, &fresh, &listing.stoken)
                 .await?
         };
-        std::fs::create_dir_all(&task.directory)
-            .map_err(|_| "无法创建下载目录，请选择可写的文件夹")?;
         let gid = rpc(state)?
             .add(
                 &download.url,
@@ -313,8 +334,10 @@ async fn enqueue(
             share: share.clone(),
             file,
             own: None,
+            direct: None,
+            connections: 0,
         };
-        created.push(start_task(&app, &state, task).await?);
+        created.push(start_task(&app, &state, task, None).await?);
     }
     if created.is_empty() {
         return Err("所选文件已在下载列表中，或文件夹为空".into());
@@ -349,6 +372,7 @@ async fn task_action(
             }
             task.status = "paused".into();
             task.speed = 0;
+            task.connections = 0;
             state.store.lock().unwrap().save(&task)?;
         }
         "resume" => {
@@ -363,7 +387,7 @@ async fn task_action(
                     .await;
             }
             task.gid = None;
-            start_task(&app, &state, task).await?;
+            start_task(&app, &state, task, None).await?;
         }
         "remove" => {
             if let Some(gid) = &task.gid {
@@ -427,6 +451,7 @@ async fn poll_engine(app: tauri::AppHandle) {
                             "totalLength",
                             "completedLength",
                             "downloadSpeed",
+                            "connections",
                             "errorCode"
                         ]),
                     ],
@@ -443,13 +468,24 @@ async fn poll_engine(app: tauri::AppHandle) {
             };
             task.status = value["status"].as_str().unwrap_or("waiting").into();
             task.completed = number("completedLength");
-            task.speed = number("downloadSpeed");
+            task.speed = if task.status == "active" {
+                number("downloadSpeed")
+            } else {
+                0
+            };
+            task.connections = number("connections") as u32;
             if number("totalLength") > 0 {
                 task.size = number("totalLength");
             }
             if task.status == "error" {
                 let code = value["errorCode"].as_str().unwrap_or("未知");
                 task.error = match code {
+                    "3" | "22" | "24" if task.direct.is_some() => {
+                        "文件链接已失效或需要权限，请获取有效直链后新建任务".into()
+                    }
+                    "8" if task.direct.is_some() => {
+                        "服务器无法续传此文件，请获取新链接后重新下载".into()
+                    }
                     "3" | "22" | "24" => "下载地址可能已失效，点击重试将重新解析地址".into(),
                     "9" => "磁盘空间不足，请释放空间后重试".into(),
                     "13" => "文件已存在，请检查下载目录".into(),
@@ -473,15 +509,12 @@ async fn poll_engine(app: tauri::AppHandle) {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            tray::restore(app);
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            tray::setup(app)?;
             let dir = app.path().app_data_dir()?;
             migration::migrate(&dir)?;
             std::fs::create_dir_all(&dir)?;
@@ -501,6 +534,7 @@ pub fn run() {
                 }
                 task.gid = None;
                 task.speed = 0;
+                task.connections = 0;
                 store.save(&task)?;
             }
             for mut upload in store.uploads()? {
@@ -533,8 +567,11 @@ pub fn run() {
             if let Some(main) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
                 main.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { .. } = event {
-                        handle.exit(0);
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
                     }
                 });
             }
@@ -552,6 +589,7 @@ pub fn run() {
             snapshot,
             set_directory,
             enqueue,
+            direct_commands::enqueue_direct,
             task_action,
             open_directory,
             drive_commands::drive_list,

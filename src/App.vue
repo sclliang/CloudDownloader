@@ -6,6 +6,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import DrivePanel from "./DrivePanel.vue";
 import UploadPanel from "./UploadPanel.vue";
 import SharePanel from "./SharePanel.vue";
+import ResonatorStage from "./ResonatorStage.vue";
+import DirectDownloadForm from "./DirectDownloadForm.vue";
+import { version } from "../package.json";
 import type { UploadTask, CreatedShare } from "./cloud";
 import {
   ArrowDownToLine,
@@ -69,6 +72,8 @@ type Listing = {
   files: ShareFile[];
 };
 type Task = {
+  direct?: { url: string; connections: number; rangeSupported: boolean } | null;
+  connections?: number;
   own?: { accountId: string } | null;
   share: Share;
   id: string;
@@ -105,6 +110,9 @@ const state = ref<Snapshot>({
   shares: [],
 });
 const tab = ref("all");
+const downloadMode = ref<"share" | "direct">("share");
+const directBusy = ref(false);
+const directForm = ref<InstanceType<typeof DirectDownloadForm> | null>(null);
 const shareText = ref("");
 const passcode = ref("");
 const parsing = ref(false);
@@ -204,7 +212,11 @@ const bytes = (n: number) => {
   return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`;
 };
 const progress = (t: Task) =>
-  t.size ? Math.min(100, (t.completed / t.size) * 100) : 0;
+  t.size
+    ? Math.min(100, (t.completed / t.size) * 100)
+    : t.status === "complete"
+      ? 100
+      : 0;
 const statusName = (status: string) =>
   ({
     active: "下载中",
@@ -348,6 +360,11 @@ async function download() {
     adding.value = false;
   }
 }
+async function directCreated(task: { status: string; error: string }) {
+  if (task.status === "error") error.value = task.error;
+  else notice("普通链接已加入下载列表");
+  await refresh();
+}
 async function action(task: Task, action: string) {
   pendingAction.value = task.id;
   error.value = "";
@@ -396,14 +413,18 @@ onUnmounted(() => {
         <span class="brand-mark"
           ><ArrowDownToLine :size="24" :stroke-width="2.7"
         /></span>
-        <div>CloudDownloader<small>云盘下载器</small></div>
+        <div>CloudDownloader<small>鸣潮 · 云盘终端</small></div>
       </div>
       <button
         class="new-button"
         @click="
           tab = 'all';
           listing = null;
-          $nextTick(() => ($refs.shareInput as HTMLTextAreaElement)?.focus());
+          $nextTick(() =>
+            downloadMode === 'share'
+              ? ($refs.shareInput as HTMLTextAreaElement)?.focus()
+              : directForm?.focus(),
+          );
         "
       >
         <Plus :size="18" />新建下载
@@ -436,7 +457,7 @@ onUnmounted(() => {
           >
         </button>
       </nav>
-      <div class="nav-caption second-caption">账户</div>
+      <div class="nav-caption second-caption">云端空间</div>
       <nav>
         <button :class="{ selected: tab === 'drive' }" @click="tab = 'drive'">
           <Folder :size="19" />我的网盘
@@ -474,14 +495,17 @@ onUnmounted(() => {
         <div class="engine-state">
           <i :class="{ ready: state.engineRunning }"></i
           >{{ state.engineRunning ? "下载引擎已就绪" : "下载引擎未就绪"
-          }}<span>v0.3.1</span>
+          }}<span>v{{ version }}</span>
         </div>
       </div>
     </aside>
     <main class="main-content">
+      <ResonatorStage />
       <header class="page-header">
-        <div>
-          <div class="eyebrow">CLOUD · DOWNLOAD MANAGER</div>
+        <div class="page-heading-copy">
+          <div class="eyebrow">
+            <span></span> WUTHERING WAVES · CLOUD TERMINAL
+          </div>
           <h1>{{ title }}</h1>
           <p>
             {{
@@ -491,7 +515,7 @@ onUnmounted(() => {
                   ? "分片并发传输，随时掌握上传进度。"
                   : tab === "shares"
                     ? "管理通过本程序创建的百度分享链接。"
-                    : "从分享链接到本地文件，一步一步，清晰可见。"
+                    : "普通链接与网盘分享，让文件抵达本地。"
             }}
           </p>
         </div>
@@ -587,10 +611,44 @@ onUnmounted(() => {
         <section v-if="tab === 'all'" class="new-download card">
           <div class="section-title">
             <span class="section-icon"><Link :size="18" /></span>
-            <h2>从分享链接开始</h2>
-            <span>夸克 · 百度</span>
+            <h2>新建下载</h2>
+            <div
+              class="download-mode segmented"
+              role="group"
+              aria-label="下载方式"
+            >
+              <button
+                :class="{ selected: downloadMode === 'share' }"
+                :aria-pressed="downloadMode === 'share'"
+                :disabled="adding || parsing || directBusy"
+                @click="
+                  downloadMode = 'share';
+                  error = '';
+                "
+              >
+                网盘分享
+              </button>
+              <button
+                :class="{ selected: downloadMode === 'direct' }"
+                :aria-pressed="downloadMode === 'direct'"
+                :disabled="adding || parsing || directBusy"
+                @click="
+                  downloadMode = 'direct';
+                  error = '';
+                "
+              >
+                普通链接
+              </button>
+            </div>
           </div>
-          <div class="share-input-wrap">
+          <DirectDownloadForm
+            v-if="downloadMode === 'direct'"
+            ref="directForm"
+            @created="directCreated"
+            @error="error = $event"
+            @busy="directBusy = $event"
+          />
+          <div v-else class="share-input-wrap">
             <textarea
               ref="shareInput"
               v-model="shareText"
@@ -634,7 +692,10 @@ onUnmounted(() => {
             ><button class="text-button" @click="chooseDirectory">更改</button>
           </div>
         </section>
-        <section v-if="listing && tab === 'all'" class="share-results card">
+        <section
+          v-if="listing && tab === 'all' && downloadMode === 'share'"
+          class="share-results card"
+        >
           <div class="section-title">
             <span class="provider-tag">{{
               providerName(listing.share.provider)
@@ -755,7 +816,7 @@ onUnmounted(() => {
               {{
                 filter
                   ? "试试其他文件名"
-                  : "粘贴网盘分享链接，选择文件，即可开始下载。"
+                  : "粘贴普通文件链接或网盘分享，即可开始下载。"
               }}
             </p>
             <div class="empty-steps">
@@ -778,20 +839,45 @@ onUnmounted(() => {
                   ><i></i>{{ statusName(task.status) }}</span
                 >
               </div>
-              <div class="task-progress" :class="task.status">
+              <div
+                class="task-progress"
+                :class="[
+                  task.status,
+                  { indeterminate: !task.size && task.status === 'active' },
+                ]"
+              >
                 <div :style="{ width: `${progress(task)}%` }"></div>
               </div>
               <div class="task-meta">
                 <span class="provider-tag">{{
-                  providerName(task.share.provider) +
-                  (task.own ? " · 我的网盘" : "")
+                  task.direct
+                    ? "普通链接"
+                    : providerName(task.share.provider) +
+                      (task.own ? " · 我的网盘" : "")
                 }}</span>
-                <span>{{ bytes(task.completed) }} / {{ bytes(task.size) }}</span
+                <span
+                  >{{ bytes(task.completed) }} /
+                  {{
+                    task.size || task.status === "complete"
+                      ? bytes(task.size)
+                      : "未知大小"
+                  }}</span
                 ><span v-if="task.speed">{{ bytes(task.speed) }}/s</span
                 ><span v-if="task.status === 'complete'"
                   ><Check :size="12" />已保存到本地</span
-                ><span v-else>{{ progress(task).toFixed(1) }}%</span>
+                ><span v-else-if="task.size"
+                  >{{ progress(task).toFixed(1) }}%</span
+                >
               </div>
+              <p v-if="task.direct" class="direct-task-detail">
+                {{
+                  task.direct.rangeSupported
+                    ? task.status === "active"
+                      ? `${task.connections || 0} 路连接 · 最多 ${task.direct.connections} 路`
+                      : `支持分段 · 最多 ${task.direct.connections} 路连接`
+                    : "单连接 · 服务器不支持分段，恢复时从头下载"
+                }}
+              </p>
               <p v-if="task.error" class="task-error">{{ task.error }}</p>
             </div>
             <div class="task-actions">
@@ -812,7 +898,11 @@ onUnmounted(() => {
                   v-if="['paused', 'error', 'cancelled'].includes(task.status)"
                   class="icon-button"
                   :title="
-                    task.status === 'error' ? '重新解析并重试' : '继续下载'
+                    task.status === 'error'
+                      ? task.direct
+                        ? '重试下载'
+                        : '重新解析并重试'
+                      : '继续下载'
                   "
                   aria-label="继续下载"
                   @click="action(task, 'resume')"
@@ -839,7 +929,7 @@ onUnmounted(() => {
         </section>
         <div class="bottom-note">
           <ShieldCheck :size="14" /><span
-            >下载记录保存在本机 · 关闭软件后，可从暂停位置继续</span
+            >关闭窗口后在托盘继续下载 · 右键托盘图标可退出程序</span
           >
         </div>
       </template>

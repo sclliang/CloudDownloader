@@ -3,7 +3,7 @@ $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $running = Get-Process clouddownloader -ErrorAction SilentlyContinue | Where-Object {
     $_.Path -and $_.Path.StartsWith($projectRoot + '\', [StringComparison]::OrdinalIgnoreCase)
 }
-if ($running) { throw '请先关闭正在运行的 CloudDownloader，再执行打包。' }
+if ($running) { throw '请先从托盘菜单退出正在运行的 CloudDownloader，再执行打包。' }
 Push-Location $projectRoot
 try {
     if (-not (Test-Path 'node_modules')) {

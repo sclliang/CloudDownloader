@@ -1,0 +1,23 @@
+Wuthering Waves theme artwork
+
+The Resonator artwork is from the official Wuthering Waves Wiki hosted by Kuro Games.
+The artwork remains the property of its respective rights holders; it is not covered
+by the application's source-code license. This application is not an official game client.
+No account data is sent to the artwork source. Images are bundled locally without modification.
+
+Visual reference:
+https://wiki.kurobbs.com/mc/home
+
+The Shorekeeper / 守岸人
+Page: https://wiki.kurobbs.com/mc/item/1286814658335739904
+Image: https://prod-alicdn-community.kurobbs.com/forum/b52303b1bcaf49cbac743f0b9a95ea8820240923.png
+Local: public/themes/wuthering-waves/shorekeeper.png
+SHA256: 5493fbf628bd6061e3dbcbfe834f4f4cbbc9c13f1cd5ce76da62432e6b00a9d6
+
+Changli / 长离
+Page: https://wiki.kurobbs.com/mc/item/1262882649069621248
+Image: https://prod-alicdn-community.kurobbs.com/forum/ad43eb40ee2e470caf62f7b7ad16a87520240716.png
+Local: public/themes/wuthering-waves/changli.png
+SHA256: 21b85e6921a7780c4c1affdc146ab5898c2cecf753f2698f2d88c8949be0f12b
+
+Retrieved: 2026-10-03

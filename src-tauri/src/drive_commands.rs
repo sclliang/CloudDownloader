@@ -172,8 +172,10 @@ pub async fn drive_enqueue(
                 account_id: account_id.clone(),
                 file,
             }),
+            direct: None,
+            connections: 0,
         };
-        created.push(start_task(&app, &state, task).await?);
+        created.push(start_task(&app, &state, task, None).await?);
     }
     if created.is_empty() {
         return Err("所选文件已在任务列表中，或文件夹为空".into());

@@ -120,6 +120,20 @@ pub struct Task {
     pub file: ShareFile,
     #[serde(default)]
     pub own: Option<OwnSource>,
+    #[serde(default)]
+    pub direct: Option<DirectSource>,
+    #[serde(default)]
+    pub connections: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectSource {
+    pub url: String,
+    pub connections: u8,
+    pub range_supported: bool,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +235,18 @@ pub fn safe_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn existing_cloud_task_records_remain_readable() {
+        let legacy = serde_json::json!({"id":"old", "name":"file.zip", "size":1, "completed":0,
+            "speed":0, "status":"paused", "error":"", "directory":"C:\\Downloads", "createdAt":1, "gid":null,
+            "share":{"id":"share", "passcode":""},
+            "file":{"id":"file", "name":"file.zip", "size":1, "isDir":false,"parentId":"0"}});
+        let task: Task = serde_json::from_value(legacy).unwrap();
+        assert!(task.direct.is_none());
+        assert!(task.own.is_none());
+        assert_eq!(task.connections, 0);
+        assert_eq!(task.share.provider, Provider::Quark);
+    }
     #[test]
     fn file_names_cannot_escape_directory_or_use_devices() {
         assert_eq!(safe_name("../../secret"), ".._.._secret");

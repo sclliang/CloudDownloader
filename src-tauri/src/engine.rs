@@ -6,6 +6,10 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+#[path = "engine_direct_tests.rs"]
+mod direct_tests;
+
 #[derive(Clone)]
 pub struct Rpc {
     client: Client,
@@ -126,17 +130,56 @@ impl Rpc {
         headers: &[String],
         user_agent: &str,
     ) -> Result<String, String> {
+        self.add_with_options(url, directory, name, headers, user_agent, json!({}))
+            .await
+    }
+
+    pub async fn add_direct(
+        &self,
+        source: &crate::model::DirectSource,
+        directory: &str,
+        name: &str,
+    ) -> Result<String, String> {
+        crate::direct::validate_url(&source.url)?;
+        crate::direct::validate_connections(source.connections)?;
+        if !source.range_supported {
+            crate::direct::restart_without_ranges(Path::new(directory), name)?;
+        }
+        let connections = if source.range_supported {
+            source.connections
+        } else {
+            1
+        };
+        let mut headers = Vec::new();
+        if let Some(etag) = &source.etag {
+            headers.push(format!("If-Match: {etag}"));
+        } else if let Some(modified) = &source.last_modified {
+            headers.push(format!("If-Unmodified-Since: {modified}"));
+        }
+        self.add_with_options(&source.url, directory, name, &headers, crate::direct::USER_AGENT,
+            json!({"split": connections.to_string(), "max-connection-per-server": connections.to_string(),
+                "min-split-size":"1M", "always-resume":"true",
+                "no-netrc":"true", "follow-torrent":"false", "follow-metalink":"false"})).await
+    }
+
+    async fn add_with_options(
+        &self,
+        url: &str,
+        directory: &str,
+        name: &str,
+        headers: &[String],
+        user_agent: &str,
+        mut options: Value,
+    ) -> Result<String, String> {
         if headers.iter().any(|v| v.contains(['\r', '\n'])) || user_agent.contains(['\r', '\n']) {
             return Err("下载请求头无效".into());
         }
+        options["dir"] = json!(directory);
+        options["out"] = json!(name);
+        options["header"] = json!(headers);
+        options["user-agent"] = json!(user_agent);
         let result = self
-            .call(
-                "aria2.addUri",
-                vec![
-                    json!([url]),
-                    json!({"dir":directory,"out":name,"header":headers,"user-agent":user_agent}),
-                ],
-            )
+            .call("aria2.addUri", vec![json!([url]), options])
             .await?;
         result
             .as_str()

@@ -1,16 +1,24 @@
 # CloudDownloader · 云盘下载器
 
-Windows 网盘文件与传输工具，使用 Tauri 2、Vue 3 / TypeScript、Rust 和 aria2。当前版本 0.3.1，支持夸克和百度分享下载，以及百度个人网盘文件浏览、上传、下载和创建分享。
+Windows 文件与传输工具，使用 Tauri 2、Vue 3 / TypeScript、Rust 和 aria2。当前版本 0.4.0，支持普通 HTTP/HTTPS 链接多连接下载、夸克和百度分享下载，以及百度个人网盘文件浏览、上传、下载和创建分享。
 
 ## 使用
 
-1. 从 [GitHub Releases](https://github.com/sclliang/CloudDownloader/releases) 下载并安装 `CloudDownloader_0.3.1_x64-setup.exe`，或解压便携 ZIP。本地构建产物位于 `release/`。
-2. 打开「账号管理」，选择网盘，在各自官方窗口自行扫码或完成验证码登录。
-3. 回到主窗口，粘贴一个分享链接或完整分享文字。软件自动识别网盘和提取码。
+1. 从 [GitHub Releases](https://github.com/sclliang/CloudDownloader/releases) 下载并安装 `CloudDownloader_0.4.0_x64-setup.exe`，或解压便携 ZIP。本地构建产物位于 `release/`。
+2. 下载普通文件时，在「新建下载」中切换到「普通链接」，粘贴 HTTP/HTTPS 文件地址，选择连接数后点击「开始下载」，无需网盘登录。
+3. 下载网盘分享时，先在「账号管理」中选择网盘，在官方窗口自行扫码或完成验证码登录。切换到「网盘分享」，粘贴分享链接或完整分享文字，程序自动识别网盘和提取码。
 4. 点击「解析链接」，浏览目录、选择文件或文件夹，确认保存目录后下载。
-5. 任务支持暂停、继续、重试。重新启动后，未完成任务保持暂停；继续时重新取得下载地址。
+5. 任务支持暂停、继续、重试。程序退出再启动后，未完成任务保持暂停；继续时重新核对下载来源。
+6. 点击窗口右上角关闭按钮会收进系统托盘，传输继续运行。点击托盘图标或右键选择「打开主窗口」恢复窗口；右键选择「退出程序」才会结束程序与下载引擎。
 
 需要 Windows 10/11 x64 和 Microsoft Edge WebView2 Runtime。安装包会检查运行时；便携版需系统已安装运行时。便携版须保留 `CloudDownloader.exe`、`aria2c.exe` 和随附文件，不能只复制主程序。
+
+## 鸣潮主题
+
+- 参考鸣潮官方 Wiki，采用炭黑导航、暖白面板、浅金强调色与深色窗口标题栏。
+- 右侧显示守岸人或长离的共鸣者立绘，点击立绘下方的角色名切换；选择保存在本机，重启后恢复。
+- 窄窗口自动使用顶部立绘布局，文件列表与拖拽区域保留完整操作空间。
+- 立绘随程序内置，显示和切换无需联网。图片来源与校验值保存在 `third-party/notices/wuthering-waves.txt`。
 
 ## 百度「我的网盘」
 
@@ -26,12 +34,20 @@ Windows 网盘文件与传输工具，使用 Tauri 2、Vue 3 / TypeScript、Rust
 
 当前上传支持选择多个文件；文件夹整体上传、自动同步和网盘文件删除不在此版本中。
 
+## 普通链接多连接下载
+
+- 支持 HTTP/HTTPS 文件直链、服务器重定向和自动识别文件名，也可手动填写文件名。已有同名文件自动编号，保留原文件。
+- 默认最多 8 路连接，可选择 1、4、8、16 路；使用 aria2 分段并行传输，任务显示实际连接数。小文件可能无需全部连接，实际速度取决于服务器限速和网络。
+- 创建和恢复时检测分段支持。支持分段的服务器可暂停续传；不支持分段时使用单连接，恢复会从头重新下载该任务的未完成文件，界面会说明。
+- 已下载部分内容时，会核对可用的文件大小、ETag 或最后修改时间，发现来源变化则阻止续传。链接过期或需要网站登录时，获取有效直链后新建任务。
+- 普通下载不使用网盘账号、Cookie 或登录资料。文件直链保存在本机任务记录中以便恢复；无需登录的下载地址可以直接使用。
+
 ## 账号与下载
 
 - 两个网盘使用独立的 WebView2 登录资料，下载任务标注来源。
 - 支持目录分页、文件夹递归下载、同名文件编号、Windows 文件名清理。
-- 最多同时下载 3 个文件，每个文件最多使用 4 个连接。
-- 记录保存在 SQLite；账号 Cookie 和临时下载地址不写入任务记录。
+- 最多同时下载 3 个文件；网盘下载每文件最多 4 路连接，普通链接按所选连接数下载。
+- 记录保存在 SQLite；网盘账号 Cookie 和网盘临时下载地址不写入任务记录。
 - 密码和验证码只在官方页面中输入。网页登录会话只用于对应网盘的请求。
 - 下载引擎只监听本机，每次启动使用随机 RPC 密钥，并随主程序退出。
 - 移除任务会停止下载并移除记录，已经下载到本地的文件会保留。
@@ -61,7 +77,7 @@ npm run tauri dev -- --no-watch
 
 实际账号验证时使用 `--no-watch`，避免编辑 Rust 源码时重启登录窗口。普通开发可移除该选项。
 
-关闭开发版后运行：
+从托盘菜单退出开发版后运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build.ps1
@@ -76,7 +92,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 ```
 
-测试包含真实 aria2 与本地 HTTP Range 服务的暂停、引擎重启、更换地址续传和逐字节一致性验证，以及上传分片重试、源文件变化检测、检查点恢复、旧数据库迁移、网盘识别、错误处理、下载域名边界和 Windows 文件名处理。真实百度上传、续传、下载和分享的验证结果见 `VERIFICATION.md`；自动测试不会使用网盘账号。
+测试包含真实 aria2 与本地 HTTP 服务的多连接并发、暂停、引擎重启、更换地址续传、非分段服务器回退和逐字节一致性验证，以及上传分片重试、源文件变化检测、检查点恢复、旧数据库迁移、网盘识别、错误处理、下载域名边界和 Windows 文件名处理。真实百度上传、续传、下载和分享的验证结果见 `VERIFICATION.md`；自动测试不会使用网盘账号。
 
 ## 目录
 
@@ -87,6 +103,8 @@ cargo fmt --manifest-path src-tauri/Cargo.toml --check
 - `src-tauri/src/migration.rs`：旧资料迁移。
 - `src-tauri/src/lib.rs`：任务调度和 Tauri 命令。
 - `src-tauri/src/engine.rs`：aria2 进程、RPC 和传输测试。
+- `src-tauri/src/direct.rs`、`direct_commands.rs`：普通链接检测、文件名与续传保护、创建下载任务。
+- `src-tauri/src/tray.rs`：托盘图标、恢复窗口和退出菜单。
 - `src-tauri/src/store.rs`：SQLite 持久化。
 - `src-tauri/src/providers/baidu_drive.rs`：百度个人网盘、上传与分享接口。
 - `src-tauri/src/drive_commands.rs`：个人文件和上传任务命令。
