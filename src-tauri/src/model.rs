@@ -9,15 +9,21 @@ pub enum Provider {
     Pan115,
     Pan123,
     C139,
+    Uc,
+    Lanzou,
+    Ilanzou,
 }
 
 impl Provider {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 8] = [
         Self::Quark,
         Self::Baidu,
         Self::Pan115,
         Self::Pan123,
         Self::C139,
+        Self::Uc,
+        Self::Lanzou,
+        Self::Ilanzou,
     ];
     pub fn key(self) -> &'static str {
         match self {
@@ -26,6 +32,9 @@ impl Provider {
             Self::Pan115 => "pan115",
             Self::Pan123 => "pan123",
             Self::C139 => "c139",
+            Self::Uc => "uc",
+            Self::Lanzou => "lanzou",
+            Self::Ilanzou => "ilanzou",
         }
     }
     pub fn name(self) -> &'static str {
@@ -35,6 +44,9 @@ impl Provider {
             Self::Pan115 => "115 网盘",
             Self::Pan123 => "123 云盘",
             Self::C139 => "139 云盘",
+            Self::Uc => "UC 网盘",
+            Self::Lanzou => "蓝奏云",
+            Self::Ilanzou => "蓝奏云优享版",
         }
     }
     pub fn origin(self) -> &'static str {
@@ -44,6 +56,9 @@ impl Provider {
             Self::Pan115 => "https://115.com",
             Self::Pan123 => "https://yun.123pan.cn",
             Self::C139 => "https://yun.139.com",
+            Self::Uc => "https://drive.uc.cn",
+            Self::Lanzou => "https://pc.woozooo.com",
+            Self::Ilanzou => "https://www.ilanzou.com",
         }
     }
     pub fn login_url(self) -> &'static str {
@@ -53,6 +68,9 @@ impl Provider {
             Self::Pan115 => "https://115.com/",
             Self::Pan123 => "https://yun.123pan.cn/",
             Self::C139 => "https://yun.139.com/w/",
+            Self::Uc => "https://drive.uc.cn/",
+            Self::Lanzou => "https://pc.woozooo.com/mydisk.php",
+            Self::Ilanzou => "https://www.ilanzou.com/",
         }
     }
     pub fn allows_navigation(self, url: &url::Url) -> bool {
@@ -62,12 +80,24 @@ impl Provider {
             Self::Pan115 => &["115.com", "115cdn.com", "115rc.com", "anxia.com"],
             Self::Pan123 => &["123pan.com", "123pan.cn", "123865.com", "123912.com"],
             Self::C139 => &["139.com", "10086.cn", "cmpassport.com", "chinamobile.com"],
+            Self::Uc => &["uc.cn", "ucweb.com", "alipay.com"],
+            Self::Lanzou => &["woozooo.com"],
+            Self::Ilanzou => &["ilanzou.com"],
         };
         url.scheme() == "https"
             && domains
                 .iter()
                 .any(|d| host_matches(url.host_str().unwrap_or_default(), d))
     }
+    pub fn anonymous_share(self) -> bool {
+        matches!(self, Self::Lanzou | Self::Ilanzou | Self::Uc)
+    }
+}
+
+pub fn lanzou_host(host: &str) -> bool {
+    regex::Regex::new(r"^(?:[a-z0-9-]+\.)*(?:lanzou[a-z]?|lan[zs]o[ux])\.(?:com|net|org|cn)$")
+        .unwrap()
+        .is_match(host)
 }
 
 pub fn host_matches(host: &str, domain: &str) -> bool {
@@ -148,6 +178,30 @@ pub struct Task {
     pub direct: Option<DirectSource>,
     #[serde(default)]
     pub connections: u32,
+    #[serde(default)]
+    pub bt: Option<BtSource>,
+    #[serde(default)]
+    pub upload_speed: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BtFile {
+    pub index: u32,
+    pub path: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BtSource {
+    pub info_hash: String,
+    pub piece_length: u64,
+    pub files: Vec<BtFile>,
+    pub selected: Vec<u32>,
+    pub max_peers: u32,
+    pub upload_limit: u32,
+    pub seed_minutes: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +321,8 @@ mod tests {
             "file":{"id":"file", "name":"file.zip", "size":1, "isDir":false,"parentId":"0"}});
         let task: Task = serde_json::from_value(legacy).unwrap();
         assert!(task.direct.is_none());
+        assert!(task.bt.is_none());
+        assert_eq!(task.upload_speed, 0);
         assert!(task.own.is_none());
         assert_eq!(task.connections, 0);
         assert_eq!(task.share.provider, Provider::Quark);

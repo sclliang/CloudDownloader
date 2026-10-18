@@ -1,6 +1,8 @@
+mod bt;
 mod cloud_commands;
 mod direct;
 mod direct_commands;
+mod download_commands;
 mod download_errors;
 mod drive_commands;
 mod engine;
@@ -40,6 +42,7 @@ struct AppState {
     uploads: upload::UploadManager,
     session_cache_error: Mutex<String>,
     exiting: AtomicBool,
+    bt_jobs: download_commands::Jobs,
 }
 
 fn trusted(window: &WebviewWindow) -> Result<(), String> {
@@ -180,10 +183,22 @@ async fn start_task(
     task.status = "resolving".into();
     task.error.clear();
     task.speed = 0;
+    task.upload_speed = 0;
     state.store.lock().unwrap().save(&task)?;
     let result = async {
         std::fs::create_dir_all(&task.directory)
             .map_err(|_| "无法创建下载目录，请选择可写的文件夹")?;
+        if let Some(source) = &task.bt {
+            let base = app.path().app_data_dir().map_err(|_| "无法定位种子缓存")?;
+            let (torrent, data) = bt::load(&base, &source.info_hash)?;
+            if torrent.name != task.name
+                || torrent.files != source.files
+                || torrent.piece_length != source.piece_length
+            {
+                return Err("种子缓存与任务文件清单不一致，请重新导入种子".into());
+            }
+            return rpc(state)?.add_bt(&data, &task).await;
+        }
         if let Some(source) = &mut task.direct {
             let metadata = match prepared_direct {
                 Some(metadata) => metadata,
@@ -202,7 +217,9 @@ async fn start_task(
                 .await;
         }
         let session = session::connect(app, task.share.provider).await?;
-        session.account().await?;
+        if task.own.is_some() || !task.share.provider.anonymous_share() {
+            session.account().await?;
+        }
         let download = if let Some(source) = &task.own {
             if task.share.provider == Provider::Baidu {
                 session.drive_download(source).await?
@@ -216,13 +233,19 @@ async fn start_task(
                 .into_iter()
                 .find(|f| f.id == task.file.id)
                 .ok_or("分享中的文件已经被移除")?;
-            if task.completed > 0 && fresh.size != task.size {
+            if task.completed > 0 && fresh.size != task.file.size {
                 return Err("源文件大小已变化，请重新解析分享并创建新任务".into());
             }
             session
                 .download(&task.share, &fresh, &listing.stoken)
                 .await?
         };
+        if let Some(size) = download.size {
+            if task.completed > 0 && task.size > 0 && size != task.size {
+                return Err("源文件大小已变化，请重新创建下载任务".into());
+            }
+            task.size = size;
+        }
         let gid = rpc(state)?
             .add(
                 &download.url,
@@ -262,21 +285,22 @@ async fn enqueue(
     trusted(&window)?;
     let _guard = state.resolving.lock().await;
     let session = session::connect(&app, share.provider).await?;
-    let name = session.account().await?;
-    let account = Account {
-        provider: share.provider,
-        logged_in: true,
-        name,
-        message: "账号已连接".into(),
-    };
-    if let Some(current) = state
-        .accounts
-        .lock()
-        .unwrap()
-        .iter_mut()
-        .find(|a| a.provider == share.provider)
-    {
-        *current = account;
+    if !share.provider.anonymous_share() {
+        let name = session.account().await?;
+        if let Some(current) = state
+            .accounts
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|a| a.provider == share.provider)
+        {
+            *current = Account {
+                provider: share.provider,
+                logged_in: true,
+                name,
+                message: "账号已连接".into(),
+            };
+        }
     }
     if ids.is_empty() {
         return Err("请先选择文件".into());
@@ -363,6 +387,8 @@ async fn enqueue(
             own: None,
             direct: None,
             connections: 0,
+            bt: None,
+            upload_speed: 0,
         };
         created.push(start_task(&app, &state, task, None).await?);
     }
@@ -400,6 +426,7 @@ async fn task_action(
             }
             task.status = "paused".into();
             task.speed = 0;
+            task.upload_speed = 0;
             task.connections = 0;
             state.store.lock().unwrap().save(&task)?;
         }
@@ -409,10 +436,7 @@ async fn task_action(
             }
             if let Some(gid) = &task.gid {
                 let rpc = rpc(&state)?;
-                let _ = rpc.call("aria2.forceRemove", vec![json!(gid)]).await;
-                let _ = rpc
-                    .call("aria2.removeDownloadResult", vec![json!(gid)])
-                    .await;
+                rpc.stop_for_removal(gid).await?;
             }
             task.gid = None;
             start_task(&app, &state, task, None).await?;
@@ -423,6 +447,7 @@ async fn task_action(
             }
             task.gid = None;
             task.speed = 0;
+            task.upload_speed = 0;
             task.connections = 0;
             if task.status != "complete" {
                 task.status = "paused".into();
@@ -465,9 +490,13 @@ async fn poll_engine(app: tauri::AppHandle) {
         let Ok(rpc) = rpc(&state) else {
             continue;
         };
+        download_commands::expire_jobs(&state, &rpc).await;
         let tasks = state.store.lock().unwrap().tasks().unwrap_or_default();
         for mut task in tasks {
-            if !matches!(task.status.as_str(), "active" | "waiting" | "paused") {
+            if !matches!(
+                task.status.as_str(),
+                "active" | "waiting" | "paused" | "seeding"
+            ) {
                 continue;
             }
             let Some(gid) = &task.gid else {
@@ -486,7 +515,12 @@ async fn poll_engine(app: tauri::AppHandle) {
                             "downloadSpeed",
                             "connections",
                             "errorCode",
-                            "errorMessage"
+                            "errorMessage",
+                            "files",
+                            "numPeers",
+                            "uploadSpeed",
+                            "seeder",
+                            "bitfield"
                         ]),
                     ],
                 )
@@ -511,6 +545,22 @@ async fn poll_engine(app: tauri::AppHandle) {
             if number("totalLength") > 0 {
                 task.size = number("totalLength");
             }
+            if let Some(source) = &task.bt {
+                let (size, completed) = bt_progress(source, &value);
+                task.size = size;
+                task.completed = completed;
+                task.connections = number("numPeers") as u32;
+                task.upload_speed = if task.status == "active" {
+                    number("uploadSpeed")
+                } else {
+                    0
+                };
+                if task.status == "active" && source.seed_minutes > 0 && task.completed == task.size
+                {
+                    task.status = "seeding".into();
+                    task.speed = 0;
+                }
+            }
             if task.status == "error" {
                 let code = value["errorCode"].as_str().unwrap_or("未知");
                 task.error = download_errors::message(
@@ -531,6 +581,45 @@ async fn poll_engine(app: tauri::AppHandle) {
         }
         let _ = app.emit_to("main", "tasks-changed", ());
     }
+}
+
+fn bt_progress(source: &BtSource, value: &serde_json::Value) -> (u64, u64) {
+    let selected: HashSet<_> = source.selected.iter().copied().collect();
+    let size = source
+        .files
+        .iter()
+        .filter(|f| selected.contains(&f.index))
+        .map(|f| f.size)
+        .sum();
+    // aria2 1.37 undercounts per-file completedLength for selected multi-file
+    // torrents. Intersect verified pieces with each selected byte range instead.
+    let bitfield = value["bitfield"].as_str().unwrap_or_default();
+    let verified = |piece: u64| -> bool {
+        let Some(hex) = bitfield.as_bytes().get((piece / 4) as usize) else {
+            return false;
+        };
+        let Some(nibble) = (*hex as char).to_digit(16) else {
+            return false;
+        };
+        nibble & (8 >> (piece % 4)) != 0
+    };
+    let mut completed = 0;
+    let mut offset = 0;
+    if source.piece_length > 0 {
+        for file in &source.files {
+            let end = offset + file.size;
+            if file.size > 0 && selected.contains(&file.index) {
+                for piece in offset / source.piece_length..end.div_ceil(source.piece_length) {
+                    if verified(piece) {
+                        completed += end.min((piece + 1) * source.piece_length)
+                            - offset.max(piece * source.piece_length);
+                    }
+                }
+            }
+            offset = end;
+        }
+    }
+    (size, completed)
 }
 
 pub fn run() {
@@ -556,11 +645,15 @@ pub fn run() {
                 store.set_setting("download_dir", &downloads.to_string_lossy())?;
             }
             for mut task in store.tasks()? {
-                if matches!(task.status.as_str(), "active" | "waiting" | "resolving") {
+                if matches!(
+                    task.status.as_str(),
+                    "active" | "waiting" | "resolving" | "seeding"
+                ) {
                     task.status = "paused".into();
                 }
                 task.gid = None;
                 task.speed = 0;
+                task.upload_speed = 0;
                 task.connections = 0;
                 store.save(&task)?;
             }
@@ -592,6 +685,7 @@ pub fn run() {
                 uploads: upload::UploadManager::default(),
                 session_cache_error: Mutex::new(String::new()),
                 exiting: AtomicBool::new(false),
+                bt_jobs: Default::default(),
             });
             if let Some(main) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
@@ -628,6 +722,10 @@ pub fn run() {
             set_directory,
             enqueue,
             direct_commands::enqueue_direct,
+            download_commands::inspect_download,
+            download_commands::poll_bt_inspection,
+            download_commands::cancel_bt_inspection,
+            download_commands::enqueue_bt,
             task_action,
             open_directory,
             drive_commands::drive_list,

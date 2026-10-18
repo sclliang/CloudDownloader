@@ -4,6 +4,7 @@ use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 // A registered window can be observed before its CookieManager restoration
 // finishes. All 115 callers must wait for the complete initialization sequence.
 static PAN115_INITIALIZATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ILANZOU_DEVICE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub fn window(
     app: &tauri::AppHandle,
@@ -109,6 +110,17 @@ pub async fn connect(
             "https://mail.10086.cn/",
             "https://personal-kd-njs.yun.139.com/",
         ],
+        Provider::Uc => &[
+            "https://drive.uc.cn/",
+            "https://pc-api.uc.cn/",
+            "https://fast.uc.cn/",
+        ],
+        Provider::Lanzou => &["https://pc.woozooo.com/", "https://accounts.woozooo.com/"],
+        Provider::Ilanzou => &[
+            "https://www.ilanzou.com/",
+            "https://apis.ilanzou.com/",
+            "https://apix.ilanzou.com/",
+        ],
     };
     for address in urls {
         let url: url::Url = address.parse().unwrap();
@@ -142,7 +154,7 @@ pub async fn connect(
     } else {
         String::new()
     };
-    Ok(crate::providers::Session {
+    let mut session = crate::providers::Session {
         provider,
         transport,
         device_id,
@@ -155,7 +167,40 @@ pub async fn connect(
         } else {
             String::new()
         },
-    })
+    };
+    if provider == Provider::Ilanzou {
+        let _device_guard = ILANZOU_DEVICE.lock().await;
+        session.authorization = session
+            .cookie_value(
+                &["https://www.ilanzou.com/", "https://ilanzou.com/"],
+                "appToken",
+            )
+            .unwrap_or_default();
+        let saved = app
+            .state::<crate::AppState>()
+            .store
+            .lock()
+            .unwrap()
+            .setting("ilanzou_device_id");
+        session.device_id = match saved.filter(|id| {
+            (8..=128).contains(&id.len())
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        }) {
+            Some(id) => id,
+            None => {
+                let id = session.ilanzou_uuid().await?;
+                app.state::<crate::AppState>()
+                    .store
+                    .lock()
+                    .unwrap()
+                    .set_setting("ilanzou_device_id", &id)?;
+                id
+            }
+        };
+    }
+    Ok(session)
 }
 
 fn cache_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {

@@ -1,19 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import DrivePanel from "./DrivePanel.vue";
 import CloudDrivePanel from "./CloudDrivePanel.vue";
-import {
-  type Provider,
-  providers,
-  providerName,
-  shareProvider,
-} from "./providers";
+import { type Provider, providers, providerName } from "./providers";
 import UploadPanel from "./UploadPanel.vue";
 import SharePanel from "./SharePanel.vue";
-import DirectDownloadForm from "./DirectDownloadForm.vue";
+import DownloadBox from "./DownloadBox.vue";
+import TitleBar from "./TitleBar.vue";
 import { version } from "../package.json";
 import type { UploadTask, CreatedShare } from "./cloud";
 import {
@@ -51,21 +47,10 @@ type Account = {
   name: string;
   message: string;
 };
-type ShareFile = {
-  id: string;
-  name: string;
-  size: number;
-  isDir: boolean;
-  parentId: string;
-};
 type Share = { provider: Provider; id: string; passcode: string };
-type Listing = {
-  share: Share;
-  title: string;
-  parentId: string;
-  files: ShareFile[];
-};
 type Task = {
+  bt?: { selected: number[]; maxPeers: number } | null;
+  uploadSpeed?: number;
   direct?: { url: string; connections: number; rangeSupported: boolean } | null;
   connections?: number;
   own?: { accountId: string } | null;
@@ -106,13 +91,7 @@ const state = ref<Snapshot>({
 const tab = ref("all");
 const driveProvider = ref<Provider>("quark");
 const driveBusy = ref(false);
-const downloadMode = ref<"share" | "direct">("share");
-const directBusy = ref(false);
-const directForm = ref<InstanceType<typeof DirectDownloadForm> | null>(null);
-const shareText = ref("");
-const passcode = ref("");
-const parsing = ref(false);
-const adding = ref(false);
+const downloadBox = ref<InstanceType<typeof DownloadBox> | null>(null);
 const signingIn = ref<Provider[]>([]);
 const refreshing = ref<Provider[]>([]);
 const accountFor = (provider: Provider) =>
@@ -125,16 +104,6 @@ const accountFor = (provider: Provider) =>
 const connectedCount = computed(
   () => state.value.accounts.filter((a) => a.loggedIn).length,
 );
-const currentProvider = computed<Provider>(
-  () =>
-    listing.value?.share.provider || shareProvider(shareText.value) || "quark",
-);
-const currentAccount = computed(() => accountFor(currentProvider.value));
-const listing = ref<Listing | null>(null);
-const selected = ref<string[]>([]);
-const breadcrumbs = ref<{ id: string; name: string }[]>([
-  { id: "0", name: "分享文件" },
-]);
 const error = ref("");
 const toast = ref("");
 const filter = ref("");
@@ -147,16 +116,7 @@ let interval: ReturnType<typeof setInterval> | undefined;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let unlisten: UnlistenFn | undefined;
 let loadingSnapshot = false;
-let parseVersion = 0;
-watch(shareText, () => {
-  parseVersion += 1;
-  parsing.value = false;
-  passcode.value = "";
-  listing.value = null;
-  selected.value = [];
-  error.value = "";
-});
-const activeStatuses = ["active", "waiting", "resolving"];
+const activeStatuses = ["active", "waiting", "resolving", "seeding"];
 const active = computed(() =>
   state.value.tasks.filter((t) => activeStatuses.includes(t.status)),
 );
@@ -178,17 +138,6 @@ const tasks = computed(() =>
         (tab.value === "error" && t.status === "error")) &&
       t.name.toLowerCase().includes(filter.value.toLowerCase()),
   ),
-);
-const allSelected = computed(
-  () =>
-    !!listing.value?.files.length &&
-    selected.value.length === listing.value.files.length,
-);
-const selectedSize = computed(
-  () =>
-    listing.value?.files
-      .filter((f) => selected.value.includes(f.id))
-      .reduce((n, f) => n + f.size, 0) || 0,
 );
 const title = computed(
   () =>
@@ -218,6 +167,7 @@ const progress = (t: Task) =>
 const statusName = (status: string) =>
   ({
     active: "下载中",
+    seeding: "做种中",
     waiting: "等待中",
     resolving: "获取地址",
     paused: "已暂停",
@@ -244,7 +194,7 @@ async function refresh() {
     loadingSnapshot = false;
   }
 }
-async function login(provider: Provider = currentProvider.value) {
+async function login(provider: Provider) {
   try {
     await invoke("open_login", { provider });
     if (!signingIn.value.includes(provider)) signingIn.value.push(provider);
@@ -272,52 +222,6 @@ async function checkAccount(provider: Provider, silent = false) {
     refreshing.value = refreshing.value.filter((p) => p !== provider);
   }
 }
-async function parse(parentId = "0") {
-  if (!shareText.value.trim()) {
-    error.value = "先粘贴网盘分享链接或完整分享文字";
-    return;
-  }
-  const requestVersion = ++parseVersion;
-  parsing.value = true;
-  error.value = "";
-  try {
-    const result = await invoke<Listing>("parse_link", {
-      text: shareText.value,
-      code: passcode.value,
-      parentId,
-    });
-    if (requestVersion !== parseVersion) return;
-    listing.value = result;
-    passcode.value = result.share.passcode;
-    selected.value =
-      result.files.length === 1 && !result.files[0]!.isDir
-        ? [result.files[0]!.id]
-        : [];
-    if (parentId === "0") breadcrumbs.value = [{ id: "0", name: "分享文件" }];
-  } catch (e) {
-    if (requestVersion === parseVersion) error.value = String(e);
-  } finally {
-    if (requestVersion === parseVersion) parsing.value = false;
-  }
-}
-async function enterFolder(file: ShareFile) {
-  if (!file.isDir) return;
-  await parse(file.id);
-  if (listing.value?.parentId === file.id)
-    breadcrumbs.value.push({ id: file.id, name: file.name });
-}
-async function breadcrumb(index: number) {
-  const crumb = breadcrumbs.value[index];
-  if (!crumb) return;
-  const kept = breadcrumbs.value.slice(0, index + 1);
-  await parse(crumb.id);
-  if (listing.value?.parentId === crumb.id) breadcrumbs.value = kept;
-}
-function toggleAll() {
-  selected.value = allSelected.value
-    ? []
-    : listing.value?.files.map((f) => f.id) || [];
-}
 async function chooseDirectory() {
   const path = await open({
     directory: true,
@@ -330,37 +234,9 @@ async function chooseDirectory() {
     await refresh();
   }
 }
-async function download() {
-  if (!listing.value || !selected.value.length) return;
-  if (!accountFor(listing.value.share.provider).loggedIn) {
-    await login(listing.value.share.provider);
-    return;
-  }
-  adding.value = true;
-  error.value = "";
-  try {
-    const created = await invoke<Task[]>("enqueue", {
-      share: listing.value.share,
-      parentId: listing.value.parentId,
-      ids: selected.value,
-    });
-    const errors = created.filter((t) => t.status === "error");
-    if (errors.length) error.value = errors[0]!.error;
-    else {
-      notice(`已添加 ${created.length} 个下载任务`);
-      listing.value = null;
-    }
-    tab.value = "all";
-    await refresh();
-  } catch (e) {
-    error.value = String(e);
-  } finally {
-    adding.value = false;
-  }
-}
-async function directCreated(task: { status: string; error: string }) {
-  if (task.status === "error") error.value = task.error;
-  else notice("普通链接已加入下载列表");
+async function downloadsCreated(tasks: { status: string; error: string }[]) {
+  const count = tasks.filter((t) => t.status !== "error").length;
+  if (count) notice(`已添加 ${count} 个下载任务`);
   await refresh();
 }
 async function action(task: Task, action: string) {
@@ -430,6 +306,7 @@ onUnmounted(() => {
 
 <template>
   <div class="app-shell">
+    <TitleBar @error="(message) => (error = message)" />
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-mark"
@@ -441,12 +318,7 @@ onUnmounted(() => {
         class="new-button"
         @click="
           tab = 'all';
-          listing = null;
-          $nextTick(() =>
-            downloadMode === 'share'
-              ? ($refs.shareInput as HTMLTextAreaElement)?.focus()
-              : directForm?.focus(),
-          );
+          $nextTick(() => downloadBox?.focus());
         "
       >
         <Plus :size="18" />新建下载
@@ -536,7 +408,7 @@ onUnmounted(() => {
                   ? "分片并发传输，随时掌握上传进度。"
                   : tab === "shares"
                     ? "管理通过本程序创建的百度分享链接。"
-                    : "普通链接与网盘分享，让文件抵达本地。"
+                    : "文件直链、网盘分享与 BT 下载，让文件抵达本地。"
             }}
           </p>
         </div>
@@ -669,175 +541,16 @@ onUnmounted(() => {
         </div>
       </template>
       <template v-else>
-        <section v-if="tab === 'all'" class="new-download card">
-          <div class="section-title">
-            <span class="section-icon"><Link :size="18" /></span>
-            <h2>新建下载</h2>
-            <div
-              class="download-mode segmented"
-              role="group"
-              aria-label="下载方式"
-            >
-              <button
-                :class="{ selected: downloadMode === 'share' }"
-                :aria-pressed="downloadMode === 'share'"
-                :disabled="adding || parsing || directBusy"
-                @click="
-                  downloadMode = 'share';
-                  error = '';
-                "
-              >
-                网盘分享
-              </button>
-              <button
-                :class="{ selected: downloadMode === 'direct' }"
-                :aria-pressed="downloadMode === 'direct'"
-                :disabled="adding || parsing || directBusy"
-                @click="
-                  downloadMode = 'direct';
-                  error = '';
-                "
-              >
-                普通链接
-              </button>
-            </div>
-          </div>
-          <DirectDownloadForm
-            v-if="downloadMode === 'direct'"
-            ref="directForm"
-            @created="directCreated"
-            @error="error = $event"
-            @busy="directBusy = $event"
-          />
-          <div v-else class="share-input-wrap">
-            <textarea
-              ref="shareInput"
-              v-model="shareText"
-              placeholder="粘贴夸克、百度、115、123 或 139 分享链接，自动识别网盘和提取码…"
-              aria-label="网盘分享链接"
-              spellcheck="false"
-              :disabled="adding"
-            />
-            <div class="parse-controls">
-              <label
-                ><span>提取码</span
-                ><input
-                  v-model="passcode"
-                  placeholder="自动识别"
-                  maxlength="8"
-                  aria-label="提取码"
-                  :disabled="adding" /></label
-              ><button
-                class="primary"
-                :disabled="parsing || adding || !shareText.trim()"
-                @click="parse()"
-              >
-                <LoaderCircle
-                  v-if="parsing"
-                  :size="17"
-                  class="spinning"
-                /><Search v-else :size="17" />{{
-                  parsing ? "正在解析" : "解析链接"
-                }}
-              </button>
-            </div>
-          </div>
-          <div class="directory-row">
-            <FolderOpen :size="16" /><span>保存到</span
-            ><button
-              class="directory"
-              :title="state.downloadDir"
-              @click="folder()"
-            >
-              {{ state.downloadDir || "正在加载…" }}</button
-            ><button class="text-button" @click="chooseDirectory">更改</button>
-          </div>
-        </section>
-        <section
-          v-if="listing && tab === 'all' && downloadMode === 'share'"
-          class="share-results card"
-        >
-          <div class="section-title">
-            <span class="provider-tag">{{
-              providerName(listing.share.provider)
-            }}</span>
-            <div class="breadcrumbs">
-              <template v-for="(crumb, i) in breadcrumbs" :key="crumb.id"
-                ><ChevronRight v-if="i" :size="14" /><button
-                  @click="breadcrumb(i)"
-                >
-                  {{ crumb.name }}
-                </button></template
-              >
-            </div>
-            <button
-              class="icon-button push-right"
-              aria-label="关闭文件列表"
-              @click="listing = null"
-            >
-              <X :size="17" />
-            </button>
-          </div>
-          <div class="file-list">
-            <div class="file-head">
-              <input
-                type="checkbox"
-                :checked="allSelected"
-                aria-label="全选文件"
-                @change="toggleAll"
-              /><span>文件名称</span><span>大小</span>
-            </div>
-            <div v-for="file in listing.files" :key="file.id" class="file-row">
-              <input
-                v-model="selected"
-                type="checkbox"
-                :value="file.id"
-                :aria-label="`选择 ${file.name}`"
-              /><span class="file-icon" :class="{ directory: file.isDir }"
-                ><Folder v-if="file.isDir" :size="22" /><component
-                  :is="fileIcon(file.name)"
-                  v-else
-                  :size="22" /></span
-              ><button
-                v-if="file.isDir"
-                class="file-name"
-                @click="enterFolder(file)"
-              >
-                {{ file.name }}<ChevronRight :size="15" /></button
-              ><span v-else class="file-name" :title="file.name">{{
-                file.name
-              }}</span
-              ><span class="file-size">{{
-                file.isDir ? "文件夹" : bytes(file.size)
-              }}</span>
-            </div>
-            <div v-if="!listing.files.length" class="no-files">
-              这个文件夹里没有文件
-            </div>
-          </div>
-          <footer class="selection-footer">
-            <span
-              >已选择 <b>{{ selected.length }}</b> 项
-              <span v-if="selectedSize">· {{ bytes(selectedSize) }}</span></span
-            ><button
-              class="primary"
-              :disabled="!selected.length || adding || parsing"
-              @click="download"
-            >
-              <LoaderCircle
-                v-if="adding"
-                :size="17"
-                class="spinning"
-              /><ArrowDownToLine v-else :size="17" />{{
-                adding
-                  ? "正在创建任务…"
-                  : currentAccount.loggedIn
-                    ? "下载所选文件"
-                    : "登录后下载"
-              }}
-            </button>
-          </footer>
-        </section>
+        <DownloadBox
+          v-show="tab === 'all'"
+          ref="downloadBox"
+          :accounts="state.accounts"
+          :download-dir="state.downloadDir"
+          @login="login"
+          @created="downloadsCreated"
+          @directory="chooseDirectory"
+          @folder="folder()"
+        />
         <div class="task-heading">
           <div>
             <h2>下载列表</h2>
@@ -877,7 +590,7 @@ onUnmounted(() => {
               {{
                 filter
                   ? "试试其他文件名"
-                  : "粘贴普通文件链接或网盘分享，即可开始下载。"
+                  : "粘贴文件直链、网盘分享或磁力链接，也可导入种子。"
               }}
             </p>
             <div class="empty-steps">
@@ -911,10 +624,12 @@ onUnmounted(() => {
               </div>
               <div class="task-meta">
                 <span class="provider-tag">{{
-                  task.direct
-                    ? "普通链接"
-                    : providerName(task.share.provider) +
-                      (task.own ? " · 我的网盘" : "")
+                  task.bt
+                    ? "BT 下载"
+                    : task.direct
+                      ? "普通链接"
+                      : providerName(task.share.provider) +
+                        (task.own ? " · 我的网盘" : "")
                 }}</span>
                 <span
                   >{{ bytes(task.completed) }} /
@@ -930,6 +645,12 @@ onUnmounted(() => {
                   >{{ progress(task).toFixed(1) }}%</span
                 >
               </div>
+              <p v-if="task.bt" class="direct-task-detail">
+                已选 {{ task.bt.selected.length }} 个文件 ·
+                {{ task.connections || 0 }} 个节点 / 最多
+                {{ task.bt.maxPeers }} · 上传
+                {{ bytes(task.uploadSpeed || 0) }}/s
+              </p>
               <p v-if="task.direct" class="direct-task-detail">
                 {{
                   task.direct.rangeSupported
@@ -948,7 +669,7 @@ onUnmounted(() => {
                 class="spinning"
               /><template v-else
                 ><button
-                  v-if="['active', 'waiting'].includes(task.status)"
+                  v-if="['active', 'waiting', 'seeding'].includes(task.status)"
                   class="icon-button"
                   title="暂停下载"
                   aria-label="暂停下载"

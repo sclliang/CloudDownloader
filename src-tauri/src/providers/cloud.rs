@@ -23,7 +23,7 @@ pub struct Listing {
 
 pub fn check(provider: Provider, value: Value) -> Result<Value, String> {
     let valid = match provider {
-        Provider::Quark => value["code"].as_i64() == Some(0),
+        Provider::Quark | Provider::Uc => value["code"].as_i64() == Some(0),
         Provider::Pan115 => value["state"].as_bool() == Some(true),
         Provider::Pan123 => matches!(value["code"].as_i64(), Some(0 | 200)),
         Provider::C139 => {
@@ -52,6 +52,15 @@ pub fn check(provider: Provider, value: Value) -> Result<Value, String> {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .take(24)
         .collect();
+    if provider == Provider::Uc {
+        match code.as_str() {
+            "31001" => return Err("该 UC 分享需要先登录账号才能下载".into()),
+            "23018" => return Err("该 UC 文件超出游客下载大小上限，请先登录账号".into()),
+            "14001" => return Err("UC 分享已失效或提取码有误，请重新解析".into()),
+            "41020" => return Err("UC 文件令牌已过期，请重新解析分享".into()),
+            _ => (),
+        }
+    }
     if provider == Provider::Pan115 && code == "990001" {
         return Err("115 登录会话无效（错误码 990001），请在官方窗口重新登录后刷新登录状态".into());
     }
@@ -118,7 +127,7 @@ pub fn parent_id(path: &str, provider: Provider) -> Result<String, String> {
 }
 pub fn entry(provider: Provider, raw: &Value, parent: &str) -> Result<Entry, String> {
     let (id, name, size, is_dir, modified, hash) = match provider {
-        Provider::Quark => (
+        Provider::Quark | Provider::Uc => (
             text(&raw["fid"]),
             text(&raw["file_name"]),
             number(&raw["size"]),
@@ -175,6 +184,13 @@ pub fn entry(provider: Provider, raw: &Value, parent: &str) -> Result<Entry, Str
 }
 impl Session {
     pub fn cookie_value(&self, origins: &[&str], key: &str) -> Option<String> {
+        self.cookie_value_raw(origins, key).map(|v| {
+            percent_encoding::percent_decode_str(&v)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+    }
+    pub fn cookie_value_raw(&self, origins: &[&str], key: &str) -> Option<String> {
         origins
             .iter()
             .filter_map(|origin| origin.parse().ok())
@@ -190,11 +206,7 @@ impl Session {
             .find_map(|pair| {
                 pair.split_once('=')
                     .filter(|(k, _)| *k == key)
-                    .map(|(_, v)| {
-                        percent_encoding::percent_decode_str(v)
-                            .decode_utf8_lossy()
-                            .into_owned()
-                    })
+                    .map(|(_, v)| v.to_string())
             })
     }
     pub async fn cloud_identity(&self) -> Result<(String, String), String> {
@@ -231,6 +243,9 @@ impl Session {
             Provider::Pan115 => self.pan115_identity().await?,
             Provider::Pan123 => self.pan123_identity().await?,
             Provider::C139 => self.c139_identity().await?,
+            Provider::Uc => self.uc_identity().await?,
+            Provider::Lanzou => self.lanzou_identity().await?,
+            Provider::Ilanzou => self.ilanzou_identity().await?,
             _ => return Err("此网盘使用专用文件接口".into()),
         };
         Ok((
@@ -285,6 +300,9 @@ impl Session {
             Provider::Pan115 => self.pan115_page(path, &id, page).await,
             Provider::Pan123 => self.pan123_page(path, &id, page, cursor).await,
             Provider::C139 => self.c139_page(path, &id, cursor).await,
+            Provider::Uc => self.uc_page(path, &id, page).await,
+            Provider::Lanzou => self.lanzou_page(path, &id, page).await,
+            Provider::Ilanzou => self.ilanzou_page(path, &id, page).await,
             _ => Err("此网盘使用专用文件接口".into()),
         }
     }
@@ -364,6 +382,9 @@ impl Session {
                 self.pan123_download(&file, None).await?
             }
             Provider::C139 => self.c139_personal_download(&fresh.file.id).await?,
+            Provider::Uc => return self.uc_download(&fresh.file.id, None).await,
+            Provider::Lanzou => return self.lanzou_personal_download(&fresh.file.id).await,
+            Provider::Ilanzou => self.ilanzou_download(&fresh.file.id, None).await?,
             _ => return Err("此网盘使用专用文件接口".into()),
         };
         self.download_descriptor(url)

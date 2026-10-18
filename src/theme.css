@@ -1,4 +1,4 @@
-/* Shared lavender palette and layout. */
+/* Shared theme palette and layout. */
 :root {
   color-scheme: light;
   --paper: #f8f6fc;
@@ -10,7 +10,10 @@
   --accent: #7956ad;
   --accent-hover: #684497;
   --accent-soft: #eee6fa;
+  --action: #7956ad;
+  --action-hover: #684497;
   --sidebar-width: 232px;
+  --titlebar-height: 32px;
   color: var(--ink);
   background: var(--paper);
 }
@@ -26,10 +29,13 @@ select:focus-visible {
   outline-offset: 3px;
 }
 .app-shell {
+  padding-top: var(--titlebar-height);
+  min-height: 100dvh;
   background:
     radial-gradient(ellipse at 85% 0, #eee6fa88, transparent 48%), var(--paper);
 }
 .sidebar {
+  top: var(--titlebar-height);
   width: var(--sidebar-width);
   background: linear-gradient(165deg, #f4eefb, #eee6f8);
   border-color: #e4d9f0;
@@ -120,6 +126,7 @@ h1 {
   flex-shrink: 0;
 }
 .card {
+  background: var(--surface);
   border-color: var(--line);
   box-shadow: 0 4px 18px #60407f04;
 }
@@ -140,12 +147,12 @@ h1 {
   color: var(--accent);
 }
 .primary {
-  background: var(--accent);
+  background: var(--action);
   color: white;
   border-radius: 8px;
 }
 .primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--action-hover);
   box-shadow: 0 3px 10px #7956ad24;
 }
 .secondary {
@@ -314,7 +321,7 @@ textarea::placeholder,
 .drive-workspace {
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+  height: calc(100dvh - var(--titlebar-height));
   overflow: hidden;
 }
 .drive-workspace > .page-header,
@@ -372,6 +379,7 @@ textarea::placeholder,
   background: var(--surface);
 }
 .modal-backdrop {
+  top: var(--titlebar-height);
   background: #30223f55;
   backdrop-filter: blur(3px);
 }
@@ -435,69 +443,6 @@ textarea::placeholder,
 }
 ::-webkit-scrollbar-thumb {
   background: #d7c9e6;
-}
-.download-mode {
-  margin-left: auto;
-  padding: 3px;
-}
-.download-mode button {
-  padding: 5px 11px;
-  font-size: 11px;
-}
-.direct-download-form > label,
-.direct-options label {
-  color: var(--muted);
-  font-size: 11px;
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-.direct-download-form > input,
-.direct-options input,
-.direct-options select {
-  width: 100%;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 9px 10px;
-  background: var(--surface-soft);
-  color: var(--ink);
-  font: inherit;
-  min-width: 0;
-}
-.direct-download-form > input {
-  margin-top: 7px;
-  font-size: 13px;
-}
-.direct-options {
-  display: flex;
-  align-items: flex-end;
-  gap: 12px;
-  margin-top: 13px;
-}
-.direct-filename {
-  flex: 1;
-  min-width: 100px;
-}
-.direct-options select {
-  font-size: 11px;
-}
-.direct-options .primary {
-  flex-shrink: 0;
-  min-height: 36px;
-}
-.direct-download-hint {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  font-size: 10px;
-  line-height: 1.7;
-  color: var(--muted);
-  margin: 12px 0 0;
-}
-.direct-download-hint svg {
-  flex-shrink: 0;
-  margin-top: 2px;
-  color: var(--accent);
 }
 .direct-task-detail {
   color: var(--accent);

@@ -7,6 +7,9 @@ use std::{
 };
 
 #[cfg(test)]
+#[path = "engine_bt_tests.rs"]
+mod bt_tests;
+#[cfg(test)]
 #[path = "engine_direct_tests.rs"]
 mod direct_tests;
 
@@ -23,6 +26,9 @@ pub struct Engine {
 
 impl Engine {
     pub fn start() -> Result<Self, String> {
+        Self::with_args(&[])
+    }
+    fn with_args(extra: &[&str]) -> Result<Self, String> {
         let executable = find_binary()?;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -56,6 +62,7 @@ impl Engine {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+        cmd.args(extra);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -105,6 +112,82 @@ fn find_binary() -> Result<PathBuf, String> {
 }
 
 impl Rpc {
+    pub async fn add_bt(&self, data: &[u8], task: &crate::model::Task) -> Result<String, String> {
+        use base64::Engine as _;
+        crate::bt::validate_output(task)?;
+        let source = task.bt.as_ref().ok_or("不是 BT 任务")?;
+        if source.selected.is_empty()
+            || source
+                .selected
+                .iter()
+                .any(|i| *i == 0 || *i > source.files.len() as u32)
+            || !(1..=500).contains(&source.max_peers)
+            || source.upload_limit > 1_048_576
+            || source.seed_minutes > 1440
+        {
+            return Err("BT 任务参数无效，请重新创建任务".into());
+        }
+        let options = json!({"dir":task.directory, "pause":"true", "select-file":source.selected.iter().map(u32::to_string).collect::<Vec<_>>().join(","),
+            "bt-max-peers":source.max_peers.to_string(), "max-upload-limit":format!("{}K", source.upload_limit),
+            "seed-time":source.seed_minutes.to_string(), "seed-ratio":"0.0", "bt-detach-seed-only":"true",
+            "check-integrity":"true", "continue":"true", "rpc-save-upload-metadata":"false",
+            "bt-remove-unselected-file":"false", "allow-overwrite":"false", "auto-file-renaming":"false", "follow-torrent":"false"});
+        let value = self
+            .call(
+                "aria2.addTorrent",
+                vec![
+                    json!(base64::engine::general_purpose::STANDARD.encode(data)),
+                    json!([]),
+                    options,
+                ],
+            )
+            .await?;
+        let gid = value.as_str().ok_or("BT 任务创建失败")?.to_string();
+        let result = async {
+            let status = self
+                .call(
+                    "aria2.tellStatus",
+                    vec![json!(gid), json!(["files", "infoHash"])],
+                )
+                .await?;
+            if !status["infoHash"]
+                .as_str()
+                .is_some_and(|hash| hash.eq_ignore_ascii_case(&source.info_hash))
+            {
+                return Err("下载引擎返回的种子哈希不一致".into());
+            }
+            let files = status["files"]
+                .as_array()
+                .ok_or("下载引擎没有返回种子文件清单")?;
+            if files.len() != source.files.len() {
+                return Err("下载引擎的种子文件数量不一致".into());
+            }
+            let normalize = |path: &str| {
+                path.replace('/', "\\")
+                    .trim_start_matches("\\\\?\\")
+                    .to_lowercase()
+            };
+            for (actual, expected) in files.iter().zip(&source.files) {
+                let path = std::path::Path::new(&task.directory).join(&expected.path);
+                if normalize(actual["path"].as_str().unwrap_or_default())
+                    != normalize(&path.to_string_lossy())
+                    || actual["index"].as_str() != Some(expected.index.to_string().as_str())
+                    || actual["length"].as_str() != Some(expected.size.to_string().as_str())
+                {
+                    return Err("下载引擎解析的种子路径不一致，已停止任务".into());
+                }
+            }
+            self.call("aria2.unpause", vec![json!(gid)]).await?;
+            Ok::<(), String>(())
+        }
+        .await;
+        if let Err(error) = result {
+            self.stop_for_removal(&gid).await?;
+            return Err(error);
+        }
+        Ok(gid)
+    }
+
     pub async fn stop_for_removal(&self, gid: &str) -> Result<(), String> {
         // forceRemove can race with completion or an already removed result.
         // Confirm a terminal status before allowing any local file deletion.

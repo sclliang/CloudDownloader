@@ -18,3 +18,19 @@ https://github.com/AlistGo/alist/issues/5384
 
 Protocol test fixtures contain synthetic account IDs, file IDs and URLs.
 They are verified locally and do not establish live provider compatibility.
+
+
+Additional references reviewed on 2026-10-18
+CYQawa/YunX: https://github.com/CYQawa/YunX
+Reviewed revision: 0a7c71eab81ba25727106fda213165f621621048
+Reference project license: GNU Affero General Public License version 3.0 or later
+License: https://github.com/CYQawa/YunX/blob/0a7c71eab81ba25727106fda213165f621621048/LICENSE
+Copyright (C) 2026 CYQawa (upstream copyright and license notices retained here).
+References: UCApi, UCConstants, LanzouApi, LanzouConstants, ILanzouApi,
+ILanzouConstants, and corresponding account/share repository wire flows.
+These were consulted for endpoint paths, request fields, cookies, response
+shapes and protocol constants. Native Rust adapters and synthetic regression
+fixtures were implemented in CloudDownloader; no upstream Kotlin source files
+or binaries are bundled. Browser account passwords are entered only on the
+official provider pages, not collected or saved by CloudDownloader.
+The official ilanzou.com web client was also checked for its appToken cookie.

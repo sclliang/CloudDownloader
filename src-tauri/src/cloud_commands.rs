@@ -140,6 +140,8 @@ pub async fn cloud_enqueue(
             }),
             direct: None,
             connections: 0,
+            bt: None,
+            upload_speed: 0,
         };
         tasks.push(start_task(&app, &state, task, None).await?);
     }

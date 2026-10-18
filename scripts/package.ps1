@@ -1,4 +1,4 @@
-param([switch]$IncludeInstaller)
+﻿param([switch]$IncludeInstaller)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -41,12 +41,22 @@ if ($numericVersion -ne $version -or $numericProductVersion -ne $version) {
     throw '主程序数字版本检查失败'
 }
 New-Item -ItemType Directory -Path (Join-Path $packageRoot 'bin') -Force | Out-Null
-Copy-Item -LiteralPath $executable -Destination (Join-Path $packageRoot 'CloudDownloader.exe') -Force
+$packageExecutable = Join-Path $packageRoot 'CloudDownloader.exe'
+if (-not (Test-Path -LiteralPath $packageExecutable) -or
+    (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash -ne
+    (Get-FileHash -LiteralPath $packageExecutable -Algorithm SHA256).Hash) {
+    Copy-Item -LiteralPath $executable -Destination $packageExecutable -Force
+}
 $engine = Join-Path $projectRoot 'src-tauri\binaries\aria2c-x86_64-pc-windows-msvc.exe'
 if ((Get-FileHash -LiteralPath $engine -Algorithm SHA256).Hash -ne 'BE2099C214F63A3CB4954B09A0BECD6E2E34660B886D4C898D260FEBFE9D70C2') {
     throw 'aria2 引擎校验失败'
 }
-Copy-Item -LiteralPath $engine -Destination (Join-Path $packageRoot 'bin\aria2c.exe') -Force
+$packageEngine = Join-Path $packageRoot 'bin\aria2c.exe'
+if (-not (Test-Path -LiteralPath $packageEngine) -or
+    (Get-FileHash -LiteralPath $packageEngine -Algorithm SHA256).Hash -ne
+    'BE2099C214F63A3CB4954B09A0BECD6E2E34660B886D4C898D260FEBFE9D70C2') {
+    Copy-Item -LiteralPath $engine -Destination $packageEngine -Force
+}
 Copy-Item -LiteralPath (Join-Path $projectRoot 'third-party\notices') -Destination (Join-Path $packageRoot 'bin') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $packageRoot -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'VERIFICATION.md') -Destination $packageRoot -Force

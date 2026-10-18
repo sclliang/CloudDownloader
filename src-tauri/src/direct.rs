@@ -5,6 +5,7 @@ use std::{path::Path, time::Duration};
 pub const USER_AGENT: &str = concat!("CloudDownloader/", env!("CARGO_PKG_VERSION"));
 
 pub struct Metadata {
+    pub content_type: Option<String>,
     pub name: String,
     pub size: u64,
     pub range_supported: bool,
@@ -134,6 +135,7 @@ pub async fn probe(input: &str) -> Result<Metadata, String> {
             .map(String::from)
     };
     Ok(Metadata {
+        content_type: text_header(header::CONTENT_TYPE),
         name: suggested_name(response.url(), headers),
         size,
         range_supported,
@@ -274,6 +276,7 @@ mod tests {
             last_modified: None,
         };
         let mut fresh = Metadata {
+            content_type: None,
             name: "a.bin".into(),
             size: 100,
             range_supported: true,

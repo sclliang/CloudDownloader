@@ -250,6 +250,358 @@ struct Request {
     headers: std::collections::HashMap<String, String>,
     body: String,
 }
+
+#[test]
+fn eight_provider_routes_preserve_lanzou_domains_and_passwords() {
+    for (address, provider, id, password) in [
+        (
+            "https://drive.uc.cn/s/FixtureUC?pwd=Ab12",
+            Provider::Uc,
+            "FixtureUC",
+            "Ab12",
+        ),
+        (
+            "https://fast.uc.cn/s/FixtureUC",
+            Provider::Uc,
+            "FixtureUC",
+            "",
+        ),
+        (
+            "https://www.ilanzou.com/s/AbC123",
+            Provider::Ilanzou,
+            "AbC123",
+            "",
+        ),
+        (
+            "http://someone.lanzoub.com/bFixture?pwd=123",
+            Provider::Lanzou,
+            "https://someone.lanzoub.com/bFixture",
+            "123",
+        ),
+        (
+            "https://pan.lanzoui.com/iFixture 密码：一二三",
+            Provider::Lanzou,
+            "https://pan.lanzoui.com/iFixture",
+            "一二三",
+        ),
+    ] {
+        let share = parse_share(address, "").unwrap();
+        assert_eq!(
+            (share.provider, share.id.as_str(), share.passcode.as_str()),
+            (provider, id, password)
+        );
+    }
+    for bad in [
+        "https://lanzou.com.evil.test/iFile",
+        "https://evililanzou.com/s/file",
+        "https://drive.uc.cn@evil.test/s/file",
+        "https://fake.uc.cn/s/file",
+        "https://lanzoub.com:444/iFile",
+    ] {
+        assert!(parse_share(bad, "").is_err(), "{bad}");
+    }
+    assert_eq!(Provider::ALL.len(), 8);
+    for provider in Provider::ALL {
+        assert_eq!(serde_json::to_value(provider).unwrap(), provider.key());
+    }
+    assert!(Provider::Uc.allows_navigation(&"https://account.uc.cn/".parse().unwrap()));
+    assert!(Provider::Lanzou.allows_navigation(&"https://accounts.woozooo.com/".parse().unwrap()));
+    assert!(!Provider::Lanzou
+        .allows_navigation(&"https://accounts.woozooo.com.evil.test/".parse().unwrap()));
+}
+
+#[test]
+fn ilanzou_aes_ecb_matches_independent_python_vectors() {
+    for (plain, expected) in [
+        ("1700000000123", "0f0032b7d6d3bf786bbf75bd3cfba202"),
+        ("123|", "d5d00a7edc829f0458983805b32d714a"),
+        ("123|456", "f2865dcb6c364c3214eaddc9ea47051a"),
+        (
+            "123|1700000000123",
+            "b037e67243e9f372d34370f81c949b03e4fb2d7484451d0fe557a0830dcb9fb9",
+        ),
+    ] {
+        assert_eq!(super::ilanzou::aes_hex(plain), expected);
+    }
+}
+
+#[tokio::test]
+async fn uc_personal_and_share_download_keep_cookie_encoding_and_account_boundaries() {
+    let raw = json!({"fid":"fid123","file_name":"sample.zip","size":513,"dir":false,"share_fid_token":"private-file-token"});
+    let (session, server) = fixture(
+        Provider::Uc,
+        vec![
+            json!({"success":true,"data":{"uid":"uc-account","nickname":"UC fixture"}}),
+            json!({"code":0,"data":{"list":[raw.clone()]},"metadata":{"_total":1}}),
+            json!({"code":0,"data":{"stoken":"private-share-token","title":"UC fixture share"}}),
+            json!({"code":0,"data":{"detail_info":{"list":[raw]}}}),
+            json!({"code":0,"data":[{"download_url":"https://uc-cdn.aliyuncs.com/file"}]}),
+            json!({"code":0,"data":[{"download_url":"https://uc-cdn.aliyuncs.com/own"}]}),
+        ],
+    )
+    .await;
+    let api = "https://pc-api.uc.cn/".parse().unwrap();
+    session
+        .transport
+        .jar
+        .add_cookie_str("__pugs=token%2Fencoded%3D; Path=/", &api);
+    session
+        .transport
+        .jar
+        .add_cookie_str("other_login_secret=private; Path=/", &api);
+    assert_eq!(session.cloud_identity().await.unwrap().1, "UC fixture");
+    let personal = session.cloud_page("/", 1, None).await.unwrap();
+    assert_eq!(personal.entries[0].file.path, "/fid123");
+    let share = parse_share("https://drive.uc.cn/s/ucshare?pwd=Ab12", "").unwrap();
+    let listing = session.list(&share, "0").await.unwrap();
+    let encoded = serde_json::to_string(&listing).unwrap();
+    assert!(!encoded.contains("private-"));
+    let download = session
+        .download(&share, &listing.files[0], &listing.stoken)
+        .await
+        .unwrap();
+    assert!(download
+        .headers
+        .contains(&"Cookie: __pugs=token%2Fencoded%3D".into()));
+    assert!(!download
+        .headers
+        .iter()
+        .any(|s| s.contains("other_login_secret") || s.contains("Authorization")));
+    let own_download = session.uc_download("fid123", None).await.unwrap();
+    assert!(own_download.user_agent.contains("uc-cloud-drive/1.6.1"));
+    let requests = server.await.unwrap();
+    assert!(requests[3]
+        .target
+        .starts_with("/1/clouddrive/transfer_share/detail?"));
+    let body: Value = serde_json::from_str(&requests[4].body).unwrap();
+    assert_eq!(body["fids_token"][0], "private-file-token");
+    assert_eq!(body["stoken"], "private-share-token");
+    assert_eq!(requests[4].headers["referer"], "https://drive.uc.cn/");
+    assert_eq!(requests[3].headers["origin"], "https://fast.uc.cn");
+    assert_eq!(requests[4].headers["user-agent"], download.user_agent);
+    assert!(download.user_agent.contains("uc-cloud-drive/2.5.20"));
+    assert!(requests[4].target.contains("entry=ft"));
+    assert!(!requests[5].target.contains("entry="));
+    assert!(requests[5].target.contains("sys=win32") && requests[5].target.contains("ve=1.6.1"));
+}
+
+#[tokio::test]
+async fn ilanzou_lists_typed_ids_and_signs_own_and_anonymous_downloads() {
+    let entries = json!([{"fileType":2,"folderId":12,"folderName":"folder"},{"fileType":1,"fileId":12,"fileName":"file.zip","fileSize":2}]);
+    let(mut session,server)=fixture(Provider::Ilanzou,vec![
+        json!({"code":200,"map":{"userId":456,"nickName":"fixture"}}),
+        json!({"code":200,"list":entries,"totalPage":1}),
+        json!({"code":200,"list":[{"fileType":1,"fileId":123,"fileName":"share.zip","fileSize":2}],"totalPage":1}),
+        json!({"__fixture_status":302,"__fixture_body":"","__fixture_headers":{"Location":"https://files.qiniup.com/share.zip"}}),
+        json!({"code":200,"map":{"userId":456,"nickName":"fixture"}}),
+        json!({"code":200,"url":"https://files.qiniup.com/own.zip"}),
+    ]).await;
+    session.authorization = "fixture:token+encoded/value".into();
+    assert_eq!(session.cloud_identity().await.unwrap().1, "fixture");
+    let own = session.cloud_page("/", 1, None).await.unwrap();
+    assert_eq!(own.entries[0].file.id, "d_12");
+    assert_eq!(own.entries[1].file.id, "f_12");
+    assert_eq!(own.entries[1].file.size, 2048);
+    let share = parse_share("https://www.ilanzou.com/s/Fixture", "").unwrap();
+    let listing = session.list(&share, "d_12").await.unwrap();
+    session.authorization.clear();
+    let download = session
+        .download(&share, &listing.files[0], "")
+        .await
+        .unwrap();
+    assert_eq!(download.url, "https://files.qiniup.com/share.zip");
+    session.authorization = "fixture:token+encoded/value".into();
+    let own_url = session.ilanzou_download("f_123", None).await.unwrap();
+    assert!(own_url.ends_with("own.zip"));
+    let requests = server.await.unwrap();
+    assert!(requests[0]
+        .target
+        .contains("appToken=fixture:token%2Bencoded%2Fvalue"));
+    let query = |r: &Request| {
+        url::Url::parse(&format!("https://fixture.test{}", r.target))
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect::<std::collections::HashMap<_, _>>()
+    };
+    assert_eq!(query(&requests[2])["folderId"], "12");
+    assert!(!query(&requests[2]).contains_key("appToken"));
+    assert_eq!(
+        query(&requests[3])["downloadId"],
+        "d5d00a7edc829f0458983805b32d714a"
+    );
+    assert_eq!(
+        query(&requests[5])["downloadId"],
+        "f2865dcb6c364c3214eaddc9ea47051a"
+    );
+    assert!(!query(&requests[3]).contains_key("extra"));
+}
+
+fn html(body: &str) -> Value {
+    json!({"__fixture_body":body,"__fixture_type":"text/html"})
+}
+
+#[tokio::test]
+async fn ilanzou_logged_in_share_uses_current_user_without_sending_app_token_to_cdn() {
+    let (session, server) = fixture(
+        Provider::Ilanzou,
+        vec![
+            json!({"code":200,"map":{"userId":456,"nickName":"fixture"}}),
+            json!({"code":200,"url":"https://files.qiniup.com/account-share.zip"}),
+        ],
+    )
+    .await;
+    let share = parse_share("https://www.ilanzou.com/s/Fixture", "").unwrap();
+    let address = session
+        .ilanzou_download("f_123", Some(&share))
+        .await
+        .unwrap();
+    let download = session.download_descriptor(address).unwrap();
+    assert!(download
+        .headers
+        .iter()
+        .all(|v| !v.contains("fixture-bearer")
+            && !v.starts_with("Cookie:")
+            && !v.starts_with("Authorization:")));
+    let requests = server.await.unwrap();
+    assert!(requests[0].target.starts_with("/proved/user/account/map?"));
+    assert!(requests[1]
+        .target
+        .contains("downloadId=f2865dcb6c364c3214eaddc9ea47051a"));
+    assert!(!requests[1].target.contains("appToken"));
+}
+
+#[tokio::test]
+async fn lanzou_single_file_uses_same_origin_iframe_and_checks_actual_download_size() {
+    let page =
+        r#"<title>sample.zip - 蓝奏云</title>文件大小：1.5 K<iframe src='/fn?file=123'></iframe>"#;
+    let frame = r#"var wp_sign='sign-fixture'; var ajaxdata='ajax-fixture'; var kdns=0; var domain1='https://apifile.woozooo.com/ajaxm.php?file=123';"#;
+    let(session,server)=fixture(Provider::Lanzou,vec![html(page),html(page),html(frame),json!({"zt":1,"dom":"http://node.panlanzou.com","url":"object-fixture"}),json!({"__fixture_body":"x","__fixture_status":206,"__fixture_type":"application/octet-stream","__fixture_headers":{"Content-Range":"bytes 0-0/1537"}})]).await;
+    let share = parse_share("https://someone.lanzoub.com/iFixture", "").unwrap();
+    let listing = session.list(&share, "0").await.unwrap();
+    assert_eq!(listing.files[0].name, "sample.zip");
+    assert_eq!(listing.files[0].size, 1536);
+    let download = session
+        .download(&share, &listing.files[0], "")
+        .await
+        .unwrap();
+    assert_eq!(download.size, Some(1537));
+    assert_eq!(
+        download.url,
+        "https://node.panlanzou.com/file/object-fixture"
+    );
+    assert!(download.headers.iter().any(|s| s == "Cookie: down_ip=1"));
+    let requests = server.await.unwrap();
+    assert_eq!(requests[2].target, "/fn?file=123");
+    let fields = url::form_urlencoded::parse(requests[3].body.as_bytes())
+        .into_owned()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(fields["sign"], "sign-fixture");
+    assert_eq!(fields["websignkey"], "ajax-fixture");
+    assert_eq!(fields["kd"], "0");
+    assert_eq!(requests[4].headers["range"], "bytes=0-0");
+}
+
+#[tokio::test]
+async fn lanzou_personal_folders_files_and_pagination_preserve_distinct_ids() {
+    let page = "var url='/doupload.php?uid=1234'; var vei='fixture+/=';";
+    let (session, server) = fixture(
+        Provider::Lanzou,
+        vec![
+            html(page),
+            html(page),
+            json!({"zt":1,"text":[{"fol_id":9,"name":"Folder &amp; Test"}]}),
+            json!({"zt":1,"text":[{"id":9,"name_all":"file.zip","size":"2 M"}]}),
+            html(page),
+            json!({"zt":2,"text":[]}),
+        ],
+    )
+    .await;
+    assert!(session.cloud_identity().await.is_ok());
+    let first = session.cloud_page("/", 1, None).await.unwrap();
+    assert_eq!(first.entries[0].file.id, "d_9");
+    assert_eq!(first.entries[0].file.name, "Folder & Test");
+    assert_eq!(first.entries[1].file.id, "f_9");
+    assert_eq!(first.entries[1].file.size, 2097152);
+    assert!(first.next.is_some());
+    assert!(session
+        .cloud_page("/", 2, first.next.as_deref())
+        .await
+        .unwrap()
+        .next
+        .is_none());
+    let requests = server.await.unwrap();
+    assert!(requests[2].target.contains("vei=fixture%2B%2F%3D"));
+    assert!(requests[2].body.contains("folder_id=-1"));
+    assert!(requests[3].body.contains("task=5"));
+}
+
+#[tokio::test]
+async fn lanzou_folder_passwords_and_wrong_iframe_domains_are_rejected() {
+    let folder = "var lx=2; var fid=123; var t='time'; var k='key'; filemoreajax";
+    let (session, server) = fixture(
+        Provider::Lanzou,
+        vec![
+            html(folder),
+            json!({"zt":1,"text":[{"id":"iFixture","name_all":"file.zip","size":"1 K"}]}),
+            json!({"zt":2}),
+            html(folder),
+            json!({"zt":3}),
+            html("<iframe src='https://evil.test/steal'></iframe>"),
+        ],
+    )
+    .await;
+    let share = parse_share("https://someone.lanzoub.com/bFolder 密码：123", "").unwrap();
+    let listing = session.list(&share, "0").await.unwrap();
+    assert_eq!(listing.files[0].id, "iFixture");
+    assert!(session
+        .list(&share, "0")
+        .await
+        .unwrap_err()
+        .contains("提取码"));
+    assert!(session
+        .download(&share, &listing.files[0], "")
+        .await
+        .err()
+        .unwrap()
+        .contains("来源不一致"));
+    let requests = server.await.unwrap();
+    assert!(requests[1].body.contains("pwd=123"));
+    assert_eq!(requests.len(), 6);
+}
+
+#[tokio::test]
+async fn new_provider_redirects_and_credential_headers_do_not_cross_domains() {
+    let(mut session,server)=fixture(Provider::Ilanzou,vec![json!({"__fixture_status":302,"__fixture_body":"","__fixture_headers":{"Location":"https://evil.test/leak"}})]).await;
+    session.authorization.clear();
+    assert!(session
+        .ilanzou_download(
+            "f_123",
+            Some(&ShareLink {
+                provider: Provider::Ilanzou,
+                id: "share".into(),
+                passcode: String::new()
+            })
+        )
+        .await
+        .is_err());
+    assert_eq!(server.await.unwrap().len(), 1);
+    for (provider, good) in [
+        (Provider::Uc, "https://uc.aliyuncs.com/file"),
+        (Provider::Ilanzou, "https://files.qiniup.com/file"),
+        (Provider::Lanzou, "https://node.panlanzou.com/file"),
+    ] {
+        assert!(validate_download(provider, good).is_ok());
+        for bad in [
+            "https://127.0.0.1/file",
+            "https://qiniup.com.evil.test/file",
+            "https://lanzou.com.evil.test/file",
+            "https://evil.test/?host=uc.cn",
+        ] {
+            assert!(validate_download(provider, bad).is_err());
+        }
+    }
+}
 async fn fixture(
     provider: Provider,
     responses: Vec<Value>,
@@ -300,8 +652,21 @@ async fn fixture(
                 }
             };
             requests.push(request);
-            let body = response.to_string();
-            let wire = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let body = response["__fixture_body"]
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| response.to_string());
+            let status = response["__fixture_status"].as_u64().unwrap_or(200);
+            let content_type = response["__fixture_type"]
+                .as_str()
+                .unwrap_or("application/json");
+            let mut extra = String::new();
+            if let Some(headers) = response["__fixture_headers"].as_object() {
+                for (key, value) in headers {
+                    extra.push_str(&format!("{key}: {}\r\n", value.as_str().unwrap()));
+                }
+            }
+            let wire = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n{body}", body.len());
             stream.write_all(wire.as_bytes()).await.unwrap();
         }
         requests

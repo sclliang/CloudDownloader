@@ -3,10 +3,13 @@ pub mod baidu_drive;
 mod c139;
 pub mod cloud;
 mod crypto;
+mod ilanzou;
+mod lanzou;
 mod pan115;
 mod pan123;
 #[cfg(test)]
 mod protocol_tests;
+mod uc;
 
 use crate::{model::*, quark::Quark};
 use reqwest::cookie::CookieStore;
@@ -26,9 +29,20 @@ pub struct Download {
     pub url: String,
     pub headers: Vec<String>,
     pub user_agent: String,
+    pub size: Option<u64>,
 }
 
 impl Session {
+    fn no_redirect(&self) -> Result<reqwest::Client, String> {
+        reqwest::Client::builder()
+            .cookie_provider(self.transport.jar.clone())
+            .user_agent(crate::quark::USER_AGENT)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(12))
+            .build()
+            .map_err(|_| "无法初始化网盘连接".into())
+    }
     fn endpoint(&self, address: &str) -> String {
         #[cfg(test)]
         if let Some(base) = &self.test_endpoint {
@@ -58,6 +72,9 @@ impl Session {
             Provider::Pan115 => self.pan115_share(share, parent).await,
             Provider::Pan123 => self.pan123_share(share, parent).await,
             Provider::C139 => self.c139_share(share, parent).await,
+            Provider::Uc => self.uc_share(share, parent).await,
+            Provider::Lanzou => self.lanzou_share(share, parent).await,
+            Provider::Ilanzou => self.ilanzou_share(share, parent).await,
         }
     }
     pub async fn download(
@@ -72,12 +89,20 @@ impl Session {
         if self.provider == Provider::Pan115 {
             return self.pan115_share_download(share, file).await;
         }
+        if self.provider == Provider::Uc {
+            return self.uc_download(&file.id, Some((share, file, token))).await;
+        }
+        if self.provider == Provider::Lanzou {
+            return self.lanzou_download(share, file).await;
+        }
         let url = match self.provider {
             Provider::Quark => self.transport.download(share, file, token).await?,
             Provider::Baidu => self.baidu_download(share, file, token).await?,
             Provider::Pan123 => self.pan123_download(file, Some(share)).await?,
             Provider::C139 => self.c139_share_download(share, file).await?,
             Provider::Pan115 => unreachable!(),
+            Provider::Ilanzou => self.ilanzou_download(&file.id, Some(share)).await?,
+            Provider::Uc | Provider::Lanzou => unreachable!(),
         };
         self.download_descriptor(url)
     }
@@ -97,6 +122,7 @@ impl Session {
         }
         Ok(Download {
             url,
+            size: None,
             headers,
             user_agent: match self.provider {
                 Provider::Quark => crate::quark::DOWNLOAD_AGENT,
@@ -141,6 +167,17 @@ impl Session {
     }
 }
 
+async fn response_text(mut response: reqwest::Response) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| "读取网盘响应失败")? {
+        if bytes.len() + chunk.len() > 4 * 1024 * 1024 {
+            return Err("网盘响应过大，请分批访问".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|_| "网盘返回的文本编码无效".into())
+}
+
 pub fn text(value: &Value) -> String {
     value
         .as_str()
@@ -178,11 +215,20 @@ pub fn parse_share(input: &str, code: &str) -> Result<ShareLink, String> {
             "123pan.com" | "www.123pan.com" | "123pan.cn" | "www.123pan.cn" | "123865.com"
             | "www.123865.com" | "123912.com" | "www.123912.com" => Provider::Pan123,
             "yun.139.com" => Provider::C139,
+            "drive.uc.cn" | "fast.uc.cn" => Provider::Uc,
+            "ilanzou.com" | "www.ilanzou.com" => Provider::Ilanzou,
+            host if lanzou_host(host) => Provider::Lanzou,
             host if host_matches(host, "share.123pan.cn") => Provider::Pan123,
             _ => continue,
         };
         let mut embedded_code = String::new();
-        let id: Option<String> = if provider == Provider::C139 {
+        let id: Option<String> = if provider == Provider::Lanzou && parts.len() == 1 {
+            let mut canonical = url.clone();
+            let _ = canonical.set_scheme("https");
+            canonical.set_query(None);
+            canonical.set_fragment(None);
+            Some(canonical.to_string().trim_end_matches('/').into())
+        } else if provider == Provider::C139 {
             if url.path().trim_end_matches('/') != "/shareweb" {
                 continue;
             }
@@ -209,9 +255,15 @@ pub fn parse_share(input: &str, code: &str) -> Result<ShareLink, String> {
         };
         let Some(id) = id.filter(|v| {
             !v.is_empty()
-                && v.len() <= 100
-                && v.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && v.len()
+                    <= if provider == Provider::Lanzou {
+                        512
+                    } else {
+                        100
+                    }
+                && (provider == Provider::Lanzou
+                    || v.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
         }) else {
             continue;
         };
@@ -245,11 +297,24 @@ pub fn parse_share(input: &str, code: &str) -> Result<ShareLink, String> {
                 .map(|c| c[1].into())
                 .unwrap_or_default();
         }
+        if provider == Provider::Lanzou && passcode.is_empty() {
+            passcode = regex::Regex::new(
+                r"(?:提取码|提取碼|密码|密碼|访问码)\s*[:：]?\s*([^\s，。；）)\]]{1,64})",
+            )
+            .unwrap()
+            .captures(input)
+            .map(|c| c[1].into())
+            .unwrap_or_default();
+        }
         if !passcode.is_empty()
+            && provider != Provider::Lanzou
             && (!(4..=8).contains(&passcode.len())
                 || !passcode.chars().all(|c| c.is_ascii_alphanumeric()))
         {
             return Err("提取码应为 4 至 8 位字母或数字".into());
+        }
+        if passcode.len() > 256 || passcode.chars().any(char::is_control) {
+            return Err("提取码无效".into());
         }
         if let Some(previous) = &found {
             if previous.provider == provider && previous.id == id {
@@ -263,10 +328,10 @@ pub fn parse_share(input: &str, code: &str) -> Result<ShareLink, String> {
             passcode,
         });
     }
-    found.ok_or("请粘贴夸克、百度、115、123 或 139 的有效分享链接".into())
+    found.ok_or("请粘贴受支持网盘的有效分享链接".into())
 }
 
-fn validate_download(provider: Provider, address: &str) -> Result<url::Url, String> {
+pub(super) fn validate_download(provider: Provider, address: &str) -> Result<url::Url, String> {
     let url = url::Url::parse(address).map_err(|_| "网盘返回了无效的下载地址")?;
     let domains: &[&str] = match provider {
         Provider::Quark => &[
@@ -301,14 +366,26 @@ fn validate_download(provider: Provider, address: &str) -> Result<url::Url, Stri
             "myhuaweicloud.com",
             "cmecloud.cn",
         ],
+        Provider::Uc => &["uc.cn", "ucweb.com", "aliyuncs.com"],
+        Provider::Lanzou => &["woozooo.com", "panlanzou.com", "lanzov.com"],
+        Provider::Ilanzou => &[
+            "ilanzou.com",
+            "qiniup.com",
+            "qiniucdn.com",
+            "qbox.me",
+            "clouddn.com",
+            "qiniu.com",
+            "qiniuio.com",
+        ],
     };
     if url.scheme() != "https"
         || !url.username().is_empty()
         || url.password().is_some()
         || url.port().is_some()
-        || !domains
-            .iter()
-            .any(|d| host_matches(url.host_str().unwrap_or_default(), d))
+        || !(provider == Provider::Lanzou && lanzou_host(url.host_str().unwrap_or_default()))
+            && !domains
+                .iter()
+                .any(|d| host_matches(url.host_str().unwrap_or_default(), d))
     {
         return Err(format!(
             "{}返回了尚未识别的下载域名，请更新适配器",

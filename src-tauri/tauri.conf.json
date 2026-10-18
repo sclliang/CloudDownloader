@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CloudDownloader",
   "mainBinaryName": "CloudDownloader",
-  "version": "0.5.4",
+  "version": "0.5.6",
   "identifier": "com.sixunited.clouddownloader",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -15,9 +15,11 @@
       {
         "title": "CloudDownloader · 云盘下载器",
         "width": 1180,
-        "height": 790,
+        "height": 822,
         "minWidth": 920,
-        "minHeight": 650,
+        "minHeight": 682,
+        "decorations": false,
+        "visible": false,
         "center": true,
         "dragDropEnabled": true,
         "additionalBrowserArgs": "--force-renderer-accessibility",

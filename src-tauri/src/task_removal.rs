@@ -17,15 +17,15 @@ fn delete_local_files(store: &Store, task: &Task) -> Result<(), String> {
     if !directory.is_absolute() || safe_name(&task.name) != task.name {
         return Err("任务的本地文件路径无效，未删除文件。可取消勾选，仅移除任务记录。".into());
     }
+    if task.bt.is_some() && directory.exists() {
+        crate::bt::validate_output(task)?;
+    }
     let directory = match fs::canonicalize(directory) {
         Ok(path) => path,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(cleanup_error(directory, error)),
     };
-    let files = [
-        directory.join(&task.name),
-        directory.join(format!("{}.aria2", task.name)),
-    ];
+    let files = output_files(task, &directory)?;
     // Legacy or overlapping task records must not let one task delete another's output.
     for other in store.tasks()? {
         if other.id == task.id {
@@ -34,8 +34,7 @@ fn delete_local_files(store: &Store, task: &Task) -> Result<(), String> {
         let Ok(other_dir) = fs::canonicalize(&other.directory) else {
             continue;
         };
-        for name in [&other.name, &format!("{}.aria2", other.name)] {
-            let other_file = other_dir.join(name);
+        for other_file in output_files(&other, &other_dir)? {
             if files.iter().any(|file| same_path(file, &other_file)) {
                 return Err("该文件或续传信息还被其他下载任务使用。请先处理其他任务，或取消勾选，仅移除当前任务记录。".into());
             }
@@ -65,14 +64,45 @@ fn delete_local_files(store: &Store, task: &Task) -> Result<(), String> {
         }
     }
     // Remove the output first: if it is locked, preserve its resume information.
-    for file in files {
+    for file in &files {
         match fs::remove_file(&file) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(cleanup_error(&file, error)),
         }
     }
+    if task.bt.is_some() {
+        let mut directories: Vec<_> = files
+            .iter()
+            .flat_map(|file| file.parent().into_iter().flat_map(|p| p.ancestors()))
+            .filter(|p| p.starts_with(&directory) && *p != directory)
+            .map(Path::to_path_buf)
+            .collect();
+        directories.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+        directories.dedup();
+        for dir in directories {
+            let _ = fs::remove_dir(dir);
+        }
+        // Preserve any extra user files. Only empty directories are removed.
+        let _ = fs::remove_dir(&directory);
+    }
     Ok(())
+}
+
+fn output_files(task: &Task, directory: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    if task.bt.is_some() {
+        let mut files: Vec<_> = crate::bt::outputs(task)?
+            .iter()
+            .map(|p| directory.join(p.strip_prefix(&task.directory).unwrap()))
+            .collect();
+        files.push(crate::bt::marker(directory));
+        Ok(files)
+    } else {
+        Ok(vec![
+            directory.join(&task.name),
+            directory.join(format!("{}.aria2", task.name)),
+        ])
+    }
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -140,6 +170,8 @@ mod tests {
                 own: None,
                 direct: None,
                 connections: 0,
+                bt: None,
+                upload_speed: 0,
             };
             self.store().save(&task).unwrap();
             task
@@ -247,5 +279,98 @@ mod tests {
         remove_record(fixture.store(), &task, true).unwrap();
         assert!(fixture.store().tasks().unwrap().is_empty());
         assert!(!output.exists());
+    }
+
+    fn bt_task(fixture: &Fixture) -> Task {
+        let mut task = fixture.task("bundle");
+        task.bt = Some(crate::model::BtSource {
+            info_hash: "a".repeat(40),
+            piece_length: 16384,
+            files: vec![
+                crate::model::BtFile {
+                    index: 1,
+                    path: "bundle/a.bin".into(),
+                    size: 10,
+                },
+                crate::model::BtFile {
+                    index: 2,
+                    path: "bundle/sub/b.bin".into(),
+                    size: 10,
+                },
+            ],
+            selected: vec![2],
+            max_peers: 64,
+            upload_limit: 512,
+            seed_minutes: 0,
+        });
+        crate::bt::mark(&task).unwrap();
+        fs::create_dir_all(fixture.directory.join("bundle/sub")).unwrap();
+        for name in ["bundle/a.bin", "bundle/sub/b.bin", "bundle.aria2"] {
+            fs::write(fixture.directory.join(name), b"payload").unwrap();
+        }
+        fixture.store().save(&task).unwrap();
+        task
+    }
+
+    #[test]
+    fn bt_keeps_files_by_default_and_protects_overlaps_and_ownership() {
+        let fixture = Fixture::new();
+        let task = bt_task(&fixture);
+        remove_record(fixture.store(), &task, false).unwrap();
+        assert!(fixture.directory.join("bundle/sub/b.bin").is_file());
+        fixture.store().save(&task).unwrap();
+        let mut other = fixture.task("b.bin");
+        other.directory = fixture
+            .directory
+            .join("bundle/sub")
+            .to_string_lossy()
+            .into();
+        fixture.store().save(&other).unwrap();
+        assert!(remove_record(fixture.store(), &task, true).is_err());
+        assert!(fixture.directory.join("bundle/a.bin").is_file());
+        fixture.store().remove(&other.id).unwrap();
+        fs::write(crate::bt::marker(&fixture.directory), b"different owner").unwrap();
+        assert!(remove_record(fixture.store(), &task, true).is_err());
+        assert!(fixture.directory.join("bundle.aria2").is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bt_refuses_junction_parents_before_deleting_any_files() {
+        use std::os::windows::fs::symlink_dir;
+        let fixture = Fixture::new();
+        let task = bt_task(&fixture);
+        fs::remove_file(fixture.directory.join("bundle/sub/b.bin")).unwrap();
+        fs::remove_dir(fixture.directory.join("bundle/sub")).unwrap();
+        let outside = fixture.directory.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("b.bin"), b"keep").unwrap();
+        let link = fixture.directory.join("bundle/sub");
+        // Developer Mode is not guaranteed; create a junction via native PowerShell
+        // in the integration environment if symlink creation is unavailable.
+        if symlink_dir(&outside, &link).is_err() {
+            use std::os::windows::process::CommandExt;
+            let status = std::process::Command::new("powershell.exe")
+                .creation_flags(0x08000000)
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &format!(
+                        "New-Item -ItemType Junction -Path '{}' -Target '{}' | Out-Null",
+                        link.display(),
+                        outside.display()
+                    ),
+                ])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let result = remove_record(fixture.store(), &task, true);
+        // Remove only the link itself before the fixture's ordinary teardown.
+        fs::remove_dir(&link).unwrap();
+        assert!(result.is_err());
+        assert!(fixture.directory.join("bundle/a.bin").is_file());
+        assert_eq!(fs::read(outside.join("b.bin")).unwrap(), b"keep");
     }
 }
