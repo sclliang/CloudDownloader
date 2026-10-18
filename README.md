@@ -1,150 +1,145 @@
-# CloudDownloader · 云盘下载器
+<p align="center">
+  <img src="./icon.svg" width="84" height="84" alt="CloudDownloader 图标" />
+</p>
 
-Windows 文件与传输工具，使用 Tauri 2、Vue 3 / TypeScript、Rust 和 aria2。当前版本 0.5.6，提供夸克、百度、115、123、139、UC、蓝奏云、蓝奏云优享版的分享下载与个人网盘下载入口，支持统一入口自动识别普通 HTTP/HTTPS、网盘分享、磁力链接及本地/远程种子下载，以及百度个人网盘上传和创建分享。115 登录资料增加 Windows 用户加密保存与重启恢复，所有网盘下载提高至每文件最多 16 路连接；各网盘真实传输验证进展见 VERIFICATION.md。
+<h1 align="center">CloudDownloader</h1>
 
-## 使用
+<p align="center">
+  <strong>文件直链 · 八个网盘 · BT 磁力与种子</strong><br />
+  一个下载入口，自动识别链接，让文件抵达本地。
+</p>
 
-下载 [v0.5.6 Release](https://github.com/sclliang/CloudDownloader/releases/tag/v0.5.6)：[Windows 安装版](https://github.com/sclliang/CloudDownloader/releases/download/v0.5.6/CloudDownloader_0.5.6_x64-setup.exe) · [便携版](https://github.com/sclliang/CloudDownloader/releases/download/v0.5.6/CloudDownloader-0.5.6-win-x64.zip) · [SHA-256 校验](https://github.com/sclliang/CloudDownloader/releases/download/v0.5.6/SHA256SUMS-0.5.6.txt)。
+<p align="center">
+  <a href="https://github.com/sclliang/CloudDownloader/releases/latest"><img src="https://img.shields.io/github/v/release/sclliang/CloudDownloader?style=flat-square&amp;label=Release&amp;color=8B68C4" alt="最新正式版本" /></a>
+  <img src="https://img.shields.io/badge/Windows-10%20%2F%2011%20%C2%B7%20x64-6A78B8?style=flat-square" alt="Windows 10 / 11 x64" />
+  <img src="https://img.shields.io/badge/Theme-Light%20%2F%20Night-A283C6?style=flat-square" alt="淡紫日间与 Night 主题" />
+</p>
 
-1. 推荐运行 `CloudDownloader_0.5.6_x64-setup.exe` 中文安装包，默认安装到当前用户目录并创建快捷方式，缺少 WebView2 时会从微软下载运行时。也可解压便携版压缩包后运行 `CloudDownloader.exe`，移动时保留完整目录结构。
-2. 「新建下载」只有一个输入框：粘贴 HTTP/HTTPS 文件直链、网盘分享文字或 `magnet:?xt=urn:btih:…` 磁力链接，程序自动识别类型，点击「解析链接」预览文件。也可点击「导入种子」选择本地 `.torrent` 文件，种子的 HTTP/HTTPS 地址直接粘贴即可。
-3. 网盘分享自动识别提取码，可手动补充。需要登录的网盘在官方窗口自行完成登录；蓝奏云、优享版和 UC 分享可先尝试免登录，服务端要求登录时再连接账号。
-4. 普通文件可改文件名及连接数；网盘和 BT 可以选择文件，网盘还可浏览子文件夹。确认保存目录后点击「开始下载」。磁力解析可取消，获取元数据阶段不下载文件内容。
-5. 任务支持暂停、继续、重试。程序退出再启动后，未完成任务保持暂停；继续时重新核对下载来源。
-6. 点击窗口右上角关闭按钮会收进系统托盘，传输继续运行。点击托盘图标或右键选择「打开主窗口」恢复窗口；右键选择「退出程序」才会结束程序与下载引擎。
+<p align="center">
+  <a href="#下载"><strong>下载应用</strong></a> ·
+  <a href="#界面预览">界面预览</a> ·
+  <a href="#支持的网盘">支持的网盘</a> ·
+  <a href="docs/usage.md">使用指南</a> ·
+  <a href="docs/development.md">开发文档</a>
+</p>
 
-需要 Windows 10/11 x64 和 Microsoft Edge WebView2 Runtime。下载引擎位于 `bin/aria2c.exe`，程序按主 EXE 所在目录定位引擎，不依赖启动时的工作目录。第三方许可资料位于 `bin/notices/`。
+---
 
-## 主题切换
+## 下载
 
-- 标题栏右上角、最小化按钮左侧的月亮／太阳按钮可在淡紫色日间主题和 Night 主题间切换，自动记住选择，重启后恢复。
-- Night 主题统一覆盖导航、文件列表、传输任务、输入框和弹窗；主题仅影响本程序主窗口。
-- 淡紫导航与页面背景、白色圆角卡片和紫色操作按钮，下载、网盘、上传、分享及弹窗使用统一配色。
-- 移除原有游戏文案、角色立绘与切换功能，文件列表使用完整内容宽度。
-- 窗口标题栏、应用图标和托盘提示与通用下载工具风格保持一致；窄窗口及较低窗口高度下自动调整布局。
+| Windows 安装版 · 推荐                 | 便携版                                 |
+| :------------------------------------ | :------------------------------------- |
+| 自动创建快捷方式，适合日常使用。      | 解压即可运行，保留完整目录结构。       |
+| **[↓ 下载 v0.5.6 安装包][installer]** | **[↓ 下载 v0.5.6 便携 ZIP][portable]** |
 
-## 个人网盘下载
+[全部版本与更新说明][releases] · [SHA-256 校验文件][checksums]
 
-- 在「我的网盘」顶部切换夸克、百度、115、123、139、UC、蓝奏云、蓝奏云优享版。点击「打开网盘」，在对应官方窗口完成登录后刷新文件列表。
-- 文件列表按窗口剩余高度滚动，底部下载、分享按钮和保存目录保持可见，适配较小窗口。
-- 支持进入文件夹、面包屑返回、分页加载，选择文件或文件夹下载。夸克、115、123、139、UC 及两个蓝奏版本的搜索框筛选已加载的文件；百度保留原来的目录及子目录搜索。
-- 一次最多选择 100 项，文件夹递归展开最多 10000 项，按云端层级保存到本地。空文件夹不单独创建。
-- 下载任务绑定创建时的账号，恢复时重新读取文件信息并获取临时下载地址。账号切换、源文件大小或校验信息变化时阻止续传。
-- 115 使用客户端加密取链；123 使用网页登录令牌和请求签名；139 的分享接口使用加密请求；无需用户填写开发者密钥或复制 Cookie。
+需要 **Windows 10 / 11 x64** 和 **Microsoft Edge WebView2 Runtime**。安装版会在缺少 WebView2 时引导下载运行时；便携版请运行目录中的 `CloudDownloader.exe`。
 
-## UC 与蓝奏云
+## 界面预览
 
-- UC 在官方网页登录；个人网盘和分享下载分别使用对应通道，分享遇到游客大小上限时提示登录。下载请求使用 UC 的 Referer 和当前下载会话。
-- 普通蓝奏在 `pc.woozooo.com` 登录，读取文件及文件夹分页；个人文件下载读取文件已有的外链信息，再解析下载地址，不修改云端文件、密码或分享设置。
-- 普通蓝奏支持常见 `lanzou` 域名族的单文件、文件夹及提取码分享。下载前检查真实文件内容类型和大小，验证页面会提示处理。
-- 优享版在 `www.ilanzou.com` 登录，复用官方网页的 appToken，并保存非敏感设备标识；使用独立的个人盘和分享接口。程序不接收或保存账号密码。
-- 三个新增网盘已完成模拟协议回归；真实账号、分享提取码、服务端验证和会员下载行为尚需使用自己的账号验证，详见 VERIFICATION.md。
+**淡紫日间 · 统一入口与多来源任务**
 
-## 百度上传与分享
+![统一下载框与多来源任务：文件直链、网盘和 BT 下载集中管理](docs/images/download-light.png)
 
-- 复用百度官方网页登录状态，不需要开放平台 API Key。打开「我的网盘」可进入文件夹、使用路径栏、分页加载和搜索当前目录及子目录。
-- 选择文件或文件夹直接下载到本地；文件夹会递归展开，任务归入原下载队列。恢复下载时核对账号、文件 ID、大小与校验信息。
-- 0.4.1 修复个人网盘大文件可能在 0 B 时失败的问题：通过文件元数据接口获取有效下载地址；HTTP 拒绝、链接不存在、限流和服务器异常会显示对应提示。
-- 在目标文件夹点击「上传文件」，一次最多选择 100 个本地文件。确认文件列表、目标目录和并发数后开始。支持创建目标文件夹。
-- 可从资源管理器将本地文件拖到「我的网盘」当前目录、列表中的文件夹或路径导航中的文件夹。拖动时高亮目标并显示完整路径，松开即加入上传队列；默认每文件 4 路并发。同样支持一次最多 100 个文件，暂不支持拖入本地文件夹。
-- 上传使用 4 MiB 分片，每文件可选 1、2、4、8 路并发；最多 2 个文件同时传输，所有任务共用 8 路并发上限。失败分片重试最多 3 次（共 4 次尝试），每次核对分片 MD5。
-- 进度按百度确认的分片计算，显示速度和估算剩余时间。支持暂停、继续、重试和移除记录；重启后未完成任务保持暂停。恢复时重新校验本地文件，并向百度查询同一上传会话仍缺少的分片。上传会话失效时需要重新上传。
-- 同名文件会提示更名或选择其他目录，不会自动覆盖。任务绑定创建时的百度账号，账号切换或本地文件变化会阻止继续上传。
-- 点击「创建分享」，确认所选文件、1/7/30 天或永久有效期和 4 位提取码；成功后可复制链接。永久链接在分享记录中显示「永久有效」，不会因时间推移被标记为过期。在「分享记录」中可取消本程序创建的分享，网盘文件会保留。
-- 「分享记录」是本机记录，不同步其他客户端创建的分享；外部取消等状态以百度页面为准。
+<details>
+<summary><strong>展开查看 Night 主题与个人网盘</strong></summary>
 
-当前上传支持选择多个文件；文件夹整体上传、自动同步和网盘文件删除不在此版本中。
+<br />
 
-## 普通链接多连接下载
+![Night 主题下的个人网盘：切换网盘、浏览文件与选择下载](docs/images/drive-night.png)
 
-- 支持 HTTP/HTTPS 文件直链、服务器重定向和自动识别文件名，也可手动填写文件名。已有同名文件自动编号，保留原文件。
-- 默认最多 16 路连接，可选择 1、4、8、16 路；使用 aria2 分段并行传输，任务显示实际连接数。小文件可能无需全部连接，实际速度取决于服务器限速和网络。
-- 创建和恢复时检测分段支持。支持分段的服务器可暂停续传；不支持分段时使用单连接，恢复会从头重新下载该任务的未完成文件，界面会说明。
-- 已下载部分内容时，会核对可用的文件大小、ETag 或最后修改时间，发现来源变化则阻止续传。链接过期或需要网站登录时，获取有效直链后新建任务。
-- 普通下载不使用网盘账号、Cookie 或登录资料。文件直链保存在本机任务记录中以便恢复；无需登录的下载地址可以直接使用。
+</details>
 
-## BT 与磁力下载
+<sub>预览图使用演示账号与示例文件，仅展示界面和交互布局。</sub>
 
-- 支持 BT v1 磁力链接（40 位十六进制或 32 位 Base32 btih）、本地 `.torrent` 和 HTTP/HTTPS 种子地址。支持 v1/混合种子，暂不支持纯 BT v2。种子大小上限 4 MiB，最多 10000 个文件；文件名需为 UTF-8 且兼容 Windows。
-- 磁力链接先向 Tracker/DHT 节点获取元数据，再显示文件列表；无在线节点时无法获取，约三分钟超时，可取消或改为导入种子。解析不等同于已经下载文件。
-- 选择部分或全部文件后创建一个 BT 任务，默认最多连接 64 个节点，可设 1–500；BT 使用节点连接，独立于 HTTP 的每服务器 16 路连接上限。
-- 下载期间会上传分片，默认每任务上传上限 512 KiB/s，填 0 表示不限。默认下载完成后停止，也可选继续做种 30 分钟、1 小时或 24 小时。
-- 每个种子使用独立的任务文件夹，保持种子内的层级和文件名，避免覆盖其他下载。跨文件的校验分片可能写入少量未选择的相邻文件数据。
-- 任务支持暂停、继续和退出重启后续传；恢复时重新验证种子缓存与已下载分片。进度按所选文件和已校验分片计算，显示节点数及上传速度。
-- 「同时删除本地文件」只清理该种子清单中的下载文件、相邻分片文件及续传信息，保留额外放入的其他文件和导入的原始种子。未勾选时下载文件保留。
-- 元数据缓存在 `%APPDATA%\com.sixunited.clouddownloader\bt-torrents\`，用于重启续传；私人 Tracker 地址可能包含在种子元数据中，请勿公开缓存文件。
+## 功能一览
 
-## 账号与下载
+| 功能                    | 可以做什么                                                       |
+| :---------------------- | :--------------------------------------------------------------- |
+| **一个下载框**          | 粘贴直链、网盘分享或磁力链接，自动识别类型；也可导入本地种子。   |
+| **八个网盘**            | 浏览个人文件、解析分享、进入子文件夹、选择文件或文件夹下载。     |
+| **多连接与续传**        | HTTP / HTTPS 最多 16 路连接，支持分段检测、暂停、继续与重试。    |
+| **BT 磁力与种子**       | 支持 v1 / 混合种子、选文件下载、节点数设置、上传限速和可选做种。 |
+| **百度上传与分享**      | 分片上传、拖放文件、新建文件夹、创建分享与管理本机分享记录。     |
+| **淡紫 / Night 双主题** | 右上角一键切换并记住选择；关闭窗口后可在托盘继续下载。           |
+| **按需清理本地文件**    | 删除任务时自行选择是否删除本地文件，默认保留。                   |
 
-- 八个网盘使用独立的 WebView2 登录资料，下载任务标注来源。115 额外使用当前 Windows 用户的 DPAPI 加密保存登录 Cookie，并在打开官方页面前恢复会话，同一网盘的并发请求会等待恢复完成；正常退出时再次保存，网页登录账号退出后清除缓存。升级后请登录一次以建立该缓存，服务端使登录失效时仍需重新登录。
-- 支持目录分页、文件夹递归下载、同名文件编号、Windows 文件名清理。
-- 最多同时下载 3 个文件；八个网盘的分享及个人网盘下载每文件最多 16 路连接，最小分段 1 MiB，普通链接按所选连接数下载。
-- 记录保存在 SQLite；网盘账号 Cookie、网页登录令牌和网盘临时下载地址不写入任务记录。123 的随机设备标识保存在本机设置中，跨重启保持一致。
-- 密码和验证码只在官方页面中输入。网页登录会话只用于对应网盘的请求。
-- 下载引擎只监听本机，每次启动使用随机 RPC 密钥，并随主程序退出。
-- 删除下载任务时可选择「同时删除本地文件」，默认不勾选。未勾选时只停止下载并移除记录，保留本地文件与续传信息；勾选后会永久删除该任务已下载或未完成的文件及对应 `.aria2` 文件。
-- 删除前先确认引擎已停止写入。文件被占用、路径异常或文件还被其他任务使用时，会保留任务记录并提示原因，可处理后重试；不会递归删除下载目录或其他文件。上传记录仍只移除记录，保留本地源文件和网盘文件。
+## 支持的网盘
 
-实际速度、会员权限、分享有效期、验证码和是否允许分享直接下载由网盘服务端决定。程序不会自动转存或删除云盘文件。当前适配网页接口，并非各网盘承诺稳定的公开 SDK，接口变化可能需要更新。各网盘实际验证进展见 `VERIFICATION.md`。
+| 网盘         | 分享下载 | 个人文件下载 | 上传 / 创建分享 |
+| :----------- | :------: | :----------: | :-------------: |
+| 夸克网盘     |    ✓     |      ✓       |        —        |
+| 百度网盘     |    ✓     |      ✓       |        ✓        |
+| 115 网盘     |    ✓     |      ✓       |        —        |
+| 123 云盘     |    ✓     |      ✓       |        —        |
+| 139 云盘     |    ✓     |      ✓       |        —        |
+| UC 网盘      |    ✓     |      ✓       |        —        |
+| 蓝奏云       |    ✓     |      ✓       |        —        |
+| 蓝奏云优享版 |    ✓     |      ✓       |        —        |
 
-UC、蓝奏云、蓝奏云优享版参考 [CYQawa/YunX](https://github.com/CYQawa/YunX) 的解析、登录凭据及下载接口流程，以 Rust 实现适配器；此前网盘参考 [YunX-Desktop](https://github.com/tidain/YunX-Desktop)。参考版本和许可出处列在 `third-party/notices/cloud-protocol-sources.txt`，未随包包含其程序或 Kotlin 源文件。
+✓ 表示对应入口已接入。UC、蓝奏云及优享版已完成模拟协议检查，真实账号和传输仍待验证；各网盘的实际验证范围见[验证记录](VERIFICATION.md)。
 
-## 从 QuarkDownloader 迁移
+## 快速开始
 
-首次运行且新资料目录不存在时，程序使用 SQLite 备份接口复制旧数据库（包含 WAL 中的数据），并复制夸克登录资料。完整复制后再启用新目录，原资料保留。旧任务视为夸克任务，下载目录和未完成文件的位置不变。
+1. **安装或解压**：打开应用，在需要时前往「账号管理」，通过对应网盘的官方窗口完成登录。
+2. **粘贴链接**：在「新建下载」粘贴文件直链、网盘分享文字或 `magnet:` 链接，点击「解析链接」；本地 `.torrent` 文件使用「导入种子」。
+3. **确认下载**：预览并选择文件，检查保存目录，点击「开始下载」。个人网盘文件可直接在「我的网盘」中选择。
 
-升级前请关闭旧版 QuarkDownloader。迁移完成后使用新版继续下载；不要同时运行两个版本操作同一下载文件。
+主题按钮位于右上角、最小化按钮左侧。关闭窗口会收进托盘；需要完全退出时，在托盘菜单中选择「退出程序」。
 
-- 新登录资料和数据库：`%APPDATA%\com.sixunited.clouddownloader\`
-- 旧资料保留：`%APPDATA%\com.sixunited.quarkdownloader\`
-- 全新安装的默认下载目录：`%USERPROFILE%\Downloads\CloudDownloader\`
-- 迁移用户继续使用原先选择的下载目录。
-- `.aria2` 文件保存续传信息，任务完成前请保留。
+[查看完整使用指南 →](docs/usage.md)
+
+## 常见问题
+
+<details>
+<summary><strong>网盘分享一定要登录吗？</strong></summary>
+
+蓝奏云、蓝奏云优享版和 UC 分享可先尝试免登录；其他网盘或服务端要求登录时，在官方窗口完成登录即可。密码和验证码只在官方页面输入，无需手动复制 Cookie 或申请开发者密钥。
+
+</details>
+
+<details>
+<summary><strong>为什么磁力链接解析较慢，或 BT 没有速度？</strong></summary>
+
+磁力链接需要从 Tracker / DHT 节点取得种子信息；没有在线节点时可能无法获取，约三分钟后超时，也可取消并改为导入 `.torrent`。目前支持 BT v1 / 混合种子，暂不支持纯 v2。实际速度取决于节点、服务器与网络条件。
+
+</details>
+
+<details>
+<summary><strong>移除任务会删除已经下载的文件吗？</strong></summary>
+
+默认只移除任务记录，保留本地文件与续传信息。主动勾选「同时删除本地文件」后，才会清理该任务的下载文件及对应续传信息；导入的原始种子和额外放入的其他文件会保留。
+
+</details>
+
+<details>
+<summary><strong>登录资料与下载记录保存在哪里？</strong></summary>
+
+保存在 `%APPDATA%\com.sixunited.clouddownloader\`。各网盘的网页登录资料相互独立，115 另使用当前 Windows 用户的 DPAPI 加密缓存。升级默认保留账号资料和任务；旧版 QuarkDownloader 的迁移说明见[使用指南](docs/usage.md#从-quarkdownloader-迁移)。
+
+</details>
 
 ## 开发与构建
 
-环境：Windows x64、Node.js、Rust MSVC、Visual Studio C++ Build Tools、WebView2 Runtime。
+使用 **Tauri 2 + Vue 3 / TypeScript + Rust + aria2** 构建。
 
 ```powershell
 npm ci
 npm run tauri dev -- --no-watch
 ```
 
-实际账号验证时使用 `--no-watch`，避免编辑 Rust 源码时重启登录窗口。普通开发可移除该选项。
+[构建安装包、运行检查与目录说明 →](docs/development.md)
 
-从托盘菜单退出开发版后运行：
+## 文档与致谢
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build.ps1
-```
+[使用指南](docs/usage.md) · [开发文档](docs/development.md) · [验证记录](VERIFICATION.md) · [更新说明](docs/release-0.5.6.md) · [第三方许可](third-party/notices/)
 
-脚本执行格式检查、Rust 测试、前端和 Tauri NSIS 发布构建，并生成中文安装包、便携版 ZIP 和 SHA-256 校验文件。所有产物位于 `package/`；主程序为 `package/CloudDownloader.exe`，引擎与许可资料位于 `package/bin/`。安装版采用相同的 bin 布局，安装与升级保留原账号资料和任务。卸载默认保留这些资料，只有主动勾选清除应用数据才会删除。打包脚本核对主程序及安装包的公司、版权、英文功能说明、四段版本、原始文件名和英语（美国）资源语言。
+网盘协议流程参考 [CYQawa/YunX](https://github.com/CYQawa/YunX) 与 [YunX-Desktop](https://github.com/tidain/YunX-Desktop)，以 Rust 实现适配器。参考版本和许可出处见[协议资料](third-party/notices/cloud-protocol-sources.txt)。
 
-```powershell
-npm run build
-cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-cargo fmt --manifest-path src-tauri/Cargo.toml --check
-```
+<p align="center"><sub>sixunited · 作者 <a href="https://github.com/sclliang">sclliang</a></sub></p>
 
-测试包含真实 aria2 与本地 HTTP 服务的多连接并发、暂停、引擎重启、更换地址续传、非分段服务器回退和逐字节一致性验证，以及上传分片重试、源文件变化检测、检查点恢复、旧数据库迁移、网盘识别、错误处理、下载域名边界和 Windows 文件名处理。真实百度上传、续传、下载和分享的验证结果见 `VERIFICATION.md`；自动测试不会使用网盘账号。
-
-## 目录
-
-- `src/`：Vue 界面与样式。
-- `src-tauri/src/providers/`：多网盘路由与百度接口。
-- `src-tauri/src/quark.rs`：夸克接口。
-- `src-tauri/src/session.rs`：独立登录窗口、后台会话读取。
-- `src-tauri/src/migration.rs`：旧资料迁移。
-- `src-tauri/src/lib.rs`：任务调度和 Tauri 命令。
-- `src-tauri/src/engine.rs`：aria2 进程、RPC 和传输测试。
-- `src-tauri/src/direct.rs`、`direct_commands.rs`：普通链接检测、文件名与续传保护、创建下载任务。
-- `src-tauri/src/tray.rs`：托盘图标、恢复窗口和退出菜单。
-- `src-tauri/src/store.rs`：SQLite 持久化。
-- `src-tauri/src/providers/baidu_drive.rs`：百度个人网盘、上传与分享接口。
-- `src-tauri/src/drive_commands.rs`：个人文件和上传任务命令。
-- `src-tauri/src/upload.rs`：分片并发、重试、暂停续传和文件校验。
-- `src-tauri/src/verification.rs`：仅开发构建启用的真实账号验证程序；只上传生成的测试文件。
-- `third-party/notices/`：第三方许可资料。
-
-aria2 的固定版本和校验值见 `third-party/notices/README.txt`。本项目未复制或运行 LinkSwift 脚本。
+[installer]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.6/CloudDownloader_0.5.6_x64-setup.exe
+[portable]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.6/CloudDownloader-0.5.6-win-x64.zip
+[checksums]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.6/SHA256SUMS-0.5.6.txt
+[releases]: https://github.com/sclliang/CloudDownloader/releases
