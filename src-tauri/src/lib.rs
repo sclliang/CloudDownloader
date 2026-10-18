@@ -1,3 +1,4 @@
+mod cloud_commands;
 mod direct;
 mod direct_commands;
 mod download_errors;
@@ -5,10 +6,12 @@ mod drive_commands;
 mod engine;
 mod migration;
 mod model;
+mod pan115_session;
 mod providers;
 mod quark;
 mod session;
 mod store;
+mod task_removal;
 mod tray;
 mod upload;
 #[cfg(debug_assertions)]
@@ -17,7 +20,15 @@ mod verification;
 use engine::{Engine, Rpc};
 use model::*;
 use serde_json::json;
-use std::{collections::HashSet, path::PathBuf, sync::Mutex, time::Duration};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+    time::Duration,
+};
 use tauri::{Emitter, Manager, State, WebviewWindow};
 
 struct AppState {
@@ -27,6 +38,8 @@ struct AppState {
     accounts: Mutex<Vec<Account>>,
     resolving: tokio::sync::Mutex<()>,
     uploads: upload::UploadManager,
+    session_cache_error: Mutex<String>,
+    exiting: AtomicBool,
 }
 
 fn trusted(window: &WebviewWindow) -> Result<(), String> {
@@ -74,7 +87,16 @@ async fn refresh_account(
             provider,
             logged_in: true,
             name,
-            message: "账号已连接".into(),
+            message: if provider == Provider::Pan115 {
+                let warning = state.session_cache_error.lock().unwrap().clone();
+                if warning.is_empty() {
+                    "账号已连接".into()
+                } else {
+                    format!("账号已连接；{warning}")
+                }
+            } else {
+                "账号已连接".into()
+            },
         },
         Err(message) => Account {
             provider,
@@ -182,7 +204,11 @@ async fn start_task(
         let session = session::connect(app, task.share.provider).await?;
         session.account().await?;
         let download = if let Some(source) = &task.own {
-            session.drive_download(source).await?
+            if task.share.provider == Provider::Baidu {
+                session.drive_download(source).await?
+            } else {
+                session.cloud_download(source).await?
+            }
         } else {
             let listing = session.list(&task.share, &task.file.parent_id).await?;
             let fresh = listing
@@ -203,7 +229,7 @@ async fn start_task(
                 &task.directory,
                 &task.name,
                 &download.headers,
-                download.user_agent,
+                &download.user_agent,
             )
             .await?;
         Ok::<String, String>(gid)
@@ -353,6 +379,7 @@ async fn task_action(
     state: State<'_, AppState>,
     id: String,
     action: String,
+    delete_files: Option<bool>,
 ) -> Result<(), String> {
     trusted(&window)?;
     let _guard = state.resolving.lock().await;
@@ -392,13 +419,18 @@ async fn task_action(
         }
         "remove" => {
             if let Some(gid) = &task.gid {
-                let rpc = rpc(&state)?;
-                let _ = rpc.call("aria2.forceRemove", vec![json!(gid)]).await;
-                let _ = rpc
-                    .call("aria2.removeDownloadResult", vec![json!(gid)])
-                    .await;
+                rpc(&state)?.stop_for_removal(gid).await?;
             }
-            state.store.lock().unwrap().remove(&id)?;
+            task.gid = None;
+            task.speed = 0;
+            task.connections = 0;
+            if task.status != "complete" {
+                task.status = "paused".into();
+            }
+            let store = state.store.lock().unwrap();
+            // Keep a stopped, retryable record if filesystem cleanup fails.
+            store.save(&task)?;
+            task_removal::remove_record(&store, &task, delete_files.unwrap_or(false))?;
         }
         _ => return Err("未知任务操作".into()),
     }
@@ -558,6 +590,8 @@ pub fn run() {
                 ),
                 resolving: tokio::sync::Mutex::new(()),
                 uploads: upload::UploadManager::default(),
+                session_cache_error: Mutex::new(String::new()),
+                exiting: AtomicBool::new(false),
             });
             if let Some(main) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
@@ -572,7 +606,16 @@ pub fn run() {
             }
             tauri::async_runtime::spawn(poll_engine(app.handle().clone()));
             #[cfg(debug_assertions)]
-            if let Some(mode) = std::env::args().find(|a| a.starts_with("--verify-baidu-")) {
+            if let Some(mode) = std::env::args().find(|a| {
+                a.starts_with("--verify-baidu-")
+                    || a == "--verify-cloud-diagnostics"
+                    || matches!(
+                        a.as_str(),
+                        "--verify-pan115-cache-seed"
+                            | "--verify-pan115-cache-restore"
+                            | "--verify-pan115-session"
+                    )
+            }) {
                 verification::start(app.handle().clone(), mode);
             }
             Ok(())
@@ -588,6 +631,8 @@ pub fn run() {
             task_action,
             open_directory,
             drive_commands::drive_list,
+            cloud_commands::cloud_list,
+            cloud_commands::cloud_enqueue,
             drive_commands::drive_enqueue,
             drive_commands::drive_mkdir,
             drive_commands::drive_share,
@@ -598,6 +643,23 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("程序初始化失败");
     app.run(|app, event| {
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
+            if let Some(state) = app.try_state::<AppState>() {
+                if !state.exiting.swap(true, Ordering::SeqCst) {
+                    api.prevent_exit();
+                    let app = app.clone();
+                    let code = code.unwrap_or(0);
+                    tauri::async_runtime::spawn(async move {
+                        let save_app = app.clone();
+                        let save = tauri::async_runtime::spawn_blocking(move || {
+                            session::save_before_exit(&save_app)
+                        });
+                        let _ = tokio::time::timeout(Duration::from_secs(3), save).await;
+                        app.exit(code);
+                    });
+                }
+            }
+        }
         if let tauri::RunEvent::Exit = event {
             if let Some(state) = app.try_state::<AppState>() {
                 state.engine.lock().unwrap().take();

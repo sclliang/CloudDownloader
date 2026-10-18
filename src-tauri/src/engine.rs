@@ -38,9 +38,9 @@ impl Engine {
             "--download-result=hide",
             "--file-allocation=none",
             "--max-concurrent-downloads=3",
-            "--split=4",
-            "--max-connection-per-server=4",
-            "--min-split-size=4M",
+            "--split=16",
+            "--max-connection-per-server=16",
+            "--min-split-size=1M",
             "--max-tries=3",
             "--retry-wait=2",
             "--continue=true",
@@ -87,10 +87,11 @@ impl Drop for Engine {
 
 fn find_binary() -> Result<PathBuf, String> {
     let current = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut candidates = vec![current
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("aria2c.exe")];
+    let executable_dir = current.parent().unwrap_or(Path::new("."));
+    let mut candidates = vec![
+        executable_dir.join("bin/aria2c.exe"),
+        executable_dir.join("aria2c.exe"),
+    ];
     if cfg!(debug_assertions) {
         candidates.push(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -104,6 +105,40 @@ fn find_binary() -> Result<PathBuf, String> {
 }
 
 impl Rpc {
+    pub async fn stop_for_removal(&self, gid: &str) -> Result<(), String> {
+        // forceRemove can race with completion or an already removed result.
+        // Confirm a terminal status before allowing any local file deletion.
+        let _ = self.call("aria2.forceRemove", vec![json!(gid)]).await;
+        for _ in 0..50 {
+            match self
+                .call("aria2.tellStatus", vec![json!(gid), json!(["status"])])
+                .await
+            {
+                Ok(value)
+                    if matches!(
+                        value["status"].as_str(),
+                        Some("removed" | "complete" | "error")
+                    ) =>
+                {
+                    let _ = self
+                        .call("aria2.removeDownloadResult", vec![json!(gid)])
+                        .await;
+                    return Ok(());
+                }
+                Err(_) => {
+                    // A missing GID is safe only if the same engine still answers.
+                    self.call("aria2.getVersion", vec![]).await.map_err(|_| {
+                        "无法确认下载引擎已停止该任务，已保留任务和本地文件，请重启程序后重试"
+                            .to_string()
+                    })?;
+                    return Ok(());
+                }
+                _ => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+        Err("下载任务尚未停止，已保留任务和本地文件，请稍后重试".into())
+    }
+
     pub async fn call(&self, method: &str, mut params: Vec<Value>) -> Result<Value, String> {
         params.insert(0, json!(format!("token:{}", self.secret)));
         let response = self
@@ -214,6 +249,41 @@ mod tests {
         rpc.call("aria2.tellStatus", vec![json!(gid)])
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn removal_stops_a_queued_task_and_handles_missing_results() {
+        let directory =
+            std::env::temp_dir().join(format!("clouddownloader-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let engine = Engine::start().unwrap();
+        ready(&engine.rpc).await;
+        let gid = engine
+            .rpc
+            .call(
+                "aria2.addUri",
+                vec![
+                    json!(["http://127.0.0.1:1/not-requested"]),
+                    json!({"pause":"true", "dir":directory, "out":"queued.bin"}),
+                ],
+            )
+            .await
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(status(&engine.rpc, &gid).await["status"], "paused");
+        engine.rpc.stop_for_removal(&gid).await.unwrap();
+        assert!(engine
+            .rpc
+            .call("aria2.tellStatus", vec![json!(gid)])
+            .await
+            .is_err());
+        engine.rpc.stop_for_removal(&gid).await.unwrap();
+        let rpc = engine.rpc.clone();
+        drop(engine);
+        assert!(rpc.stop_for_removal(&gid).await.is_err());
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     // Real aria2 + a local HTTP Range fixture; no cloud account or network required.
@@ -367,6 +437,12 @@ mod tests {
         assert!(complete, "resumed transfer timed out");
         assert!(range_requests.load(Ordering::SeqCst) > 0);
         assert_eq!(std::fs::read(&path).unwrap(), *bytes);
+        resumed.rpc.stop_for_removal(&new_gid).await.unwrap();
+        assert!(resumed
+            .rpc
+            .call("aria2.tellStatus", vec![json!(new_gid)])
+            .await
+            .is_err());
         drop(resumed);
         server.abort();
         std::fs::remove_file(&path).unwrap();

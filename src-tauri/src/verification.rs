@@ -8,7 +8,20 @@ use tauri::Manager;
 pub fn start(app: tauri::AppHandle, mode: String) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        let result = if mode == "--verify-baidu-probe" {
+        let result = if matches!(
+            mode.as_str(),
+            "--verify-pan115-cache-seed" | "--verify-pan115-cache-restore"
+        ) {
+            pan115_cookie_fixture(&app, mode.ends_with("restore")).await
+        } else if mode == "--verify-pan115-session" {
+            pan115_session_probe(&app).await
+        } else if mode == "--verify-cloud-diagnostics" {
+            async {
+                let session = session::connect(&app, Provider::C139).await?;
+                session.c139_diagnostics().await
+            }
+            .await
+        } else if mode == "--verify-baidu-probe" {
             async {
             let session = session::connect(&app, Provider::Baidu).await?;
             let listing = session.drive_list("/", 1, "").await?;
@@ -26,7 +39,15 @@ pub fn start(app: tauri::AppHandle, mode: String) {
         let dir = output_dir();
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(
-            dir.join(if mode == "--verify-baidu-download-probe" {
+            dir.join(if mode == "--verify-pan115-session" {
+                "pan115-session-probe.json"
+            } else if mode == "--verify-pan115-cache-seed" {
+                "pan115-cache-seed.json"
+            } else if mode == "--verify-pan115-cache-restore" {
+                "pan115-cache-restore.json"
+            } else if mode == "--verify-cloud-diagnostics" {
+                "cloud-diagnostics.json"
+            } else if mode == "--verify-baidu-download-probe" {
                 "baidu-download-probe.json"
             } else if mode == "--verify-baidu-permanent-share" {
                 "baidu-permanent-share.json"
@@ -45,6 +66,123 @@ pub fn start(app: tauri::AppHandle, mode: String) {
             app.exit(if result.is_ok() { 0 } else { 1 });
         }
     });
+}
+
+// Only names/attributes and authentication success are reported, never values.
+async fn pan115_session_probe(app: &tauri::AppHandle) -> Result<Value, String> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "资料目录无效")?
+        .join("pan115-session.dat");
+    let saved_before = crate::pan115_session::load(&path)?.len();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let workers = (0..3)
+        .map(|_| {
+            let app = app.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                tauri::async_runtime::block_on(session::connect(&app, Provider::Pan115))
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut sessions = Vec::new();
+    let mut connection_errors = Vec::new();
+    for worker in workers {
+        match worker.join().map_err(|_| "并发会话验证线程失败")? {
+            Ok(session) => sessions.push(session),
+            Err(error) => connection_errors.push(error),
+        }
+    }
+    let mut authentication_results = Vec::new();
+    for session in &sessions {
+        authentication_results.push(session.account().await.is_ok());
+    }
+    let window = app
+        .get_webview_window("pan115-login")
+        .ok_or("登录窗口未创建")?;
+    let cookies = window
+        .cookies_for_url("https://115.com/".parse().unwrap())
+        .map_err(|_| "无法读取测试会话")?;
+    let fields = cookies.iter().filter(|c| crate::pan115_session::COOKIE_NAMES.contains(&c.name())).map(|c| json!({"name":c.name(),"domain":c.domain(),"secure":c.secure(),"httpOnly":c.http_only(),"expires":c.expires_datetime().map(|v|v.unix_timestamp()),"valueBytes":c.value().len()})).collect::<Vec<_>>();
+    let all = window.cookies().map_err(|_| "无法枚举测试会话")?;
+    Ok(
+        json!({"savedBefore":saved_before,"savedAfter":crate::pan115_session::load(&path)?.len(),"browser":fields,"allLoginCookies":all.iter().filter(|c| crate::pan115_session::COOKIE_NAMES.contains(&c.name())).count(),"authenticationResults":authentication_results,"connectionErrors":connection_errors}),
+    )
+}
+
+// Synthetic session cookies in fresh isolated browser profiles. No navigation
+// to the provider and no use of the user's actual 115 profile or credentials.
+async fn pan115_cookie_fixture(app: &tauri::AppHandle, restoring: bool) -> Result<Value, String> {
+    use tauri::webview::cookie::{Cookie, SameSite};
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    let folder = output_dir().join("pan115-cookie-fixture");
+    std::fs::create_dir_all(&folder).map_err(|_| "无法创建登录恢复测试目录")?;
+    let cache = folder.join("session.dat");
+    let window = WebviewWindowBuilder::new(
+        app,
+        "pan115-cookie-fixture",
+        WebviewUrl::External("about:blank".parse().unwrap()),
+    )
+    .visible(false)
+    .data_directory(folder.join(format!("profile-{}", uuid::Uuid::new_v4())))
+    .build()
+    .map_err(|_| "无法创建登录恢复测试窗口")?;
+    let origin: url::Url = "https://115.com/".parse().unwrap();
+    let before = window
+        .cookies_for_url(origin.clone())
+        .map_err(|_| "无法读取测试会话")?
+        .len();
+    if before != 0 {
+        return Err("测试浏览器资料应为空".into());
+    }
+    let cookies = if restoring {
+        crate::pan115_session::load(&cache)?
+    } else {
+        ["UID", "SEID"]
+            .into_iter()
+            .map(|name| {
+                Cookie::build((name, format!("synthetic-{name}-session")))
+                    .domain(".115.com")
+                    .path("/")
+                    .secure(true)
+                    .http_only(true)
+                    .same_site(SameSite::Lax)
+                    .build()
+            })
+            .collect()
+    };
+    crate::pan115_session::restore(&window, cookies)?;
+    let after = window
+        .cookies_for_url(origin)
+        .map_err(|_| "无法读取恢复后的测试会话")?;
+    let api = window
+        .cookies_for_url("https://proapi.115.com/".parse().unwrap())
+        .map_err(|_| "无法读取测试 API 会话")?;
+    if after.len() != 2
+        || api.len() != 2
+        || after.iter().any(|cookie| {
+            cookie.value() != format!("synthetic-{}-session", cookie.name())
+                || cookie.expires_datetime().is_some()
+                || cookie.http_only() != Some(true)
+        })
+    {
+        return Err("115 测试会话属性或子域恢复失败".into());
+    }
+    if !restoring {
+        crate::pan115_session::save(&cache, after)?;
+    }
+    let bytes = std::fs::read(&cache).map_err(|_| "无法读取加密测试资料")?;
+    let encrypted = !bytes
+        .windows(b"synthetic".len())
+        .any(|part| part == b"synthetic");
+    if !encrypted {
+        return Err("登录测试资料未加密".into());
+    }
+    Ok(
+        json!({"restoring":restoring,"emptyBrowserBeforeRestore":true,"restoredCookies":2,"apiSubdomainCookies":api.len(),"httpOnlySessionAttributesPreserved":true,"encryptedAtRest":true,"actualProviderLoginAttempted":false}),
+    )
 }
 
 fn output_dir() -> PathBuf {
@@ -189,7 +327,7 @@ async fn download_engine_probe(
                 &directory.to_string_lossy(),
                 "sample.bin",
                 &first.headers,
-                first.user_agent,
+                &first.user_agent,
             )
             .await?;
         engine_probe_progress(&rpc, &gid, source.file.size, 1024 * 1024).await?;
@@ -228,7 +366,7 @@ async fn download_engine_probe(
                 &directory.to_string_lossy(),
                 "sample.bin",
                 &fresh.headers,
-                fresh.user_agent,
+                &fresh.user_agent,
             )
             .await?;
         let progress =

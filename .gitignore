@@ -13,6 +13,7 @@ node_modules
 /third-party/aria2-1.37.0/
 /third-party/*.zip
 /release/
+/package/
 dist
 dist-ssr
 *.local

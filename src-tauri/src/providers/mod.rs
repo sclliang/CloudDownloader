@@ -1,5 +1,12 @@
 mod baidu;
 pub mod baidu_drive;
+mod c139;
+pub mod cloud;
+mod crypto;
+mod pan115;
+mod pan123;
+#[cfg(test)]
+mod protocol_tests;
 
 use crate::{model::*, quark::Quark};
 use reqwest::cookie::CookieStore;
@@ -9,19 +16,36 @@ use serde_json::Value;
 pub struct Session {
     pub provider: Provider,
     pub transport: Quark,
+    pub authorization: String,
+    pub device_id: String,
+    #[cfg(test)]
+    pub test_endpoint: Option<String>,
 }
 
 pub struct Download {
     pub url: String,
     pub headers: Vec<String>,
-    pub user_agent: &'static str,
+    pub user_agent: String,
 }
 
 impl Session {
+    fn endpoint(&self, address: &str) -> String {
+        #[cfg(test)]
+        if let Some(base) = &self.test_endpoint {
+            let url = url::Url::parse(address).unwrap();
+            return format!(
+                "{base}{}{}",
+                url.path(),
+                url.query().map(|q| format!("?{q}")).unwrap_or_default()
+            );
+        }
+        address.into()
+    }
     pub async fn account(&self) -> Result<String, String> {
         match self.provider {
             Provider::Quark => self.transport.account().await,
             Provider::Baidu => self.baidu_account().await,
+            _ => self.cloud_identity().await.map(|(_, name)| name),
         }
     }
     pub async fn list(&self, share: &ShareLink, parent: &str) -> Result<ShareListing, String> {
@@ -31,6 +55,9 @@ impl Session {
         match self.provider {
             Provider::Quark => self.transport.list(share, parent).await,
             Provider::Baidu => self.baidu_list(share, parent).await,
+            Provider::Pan115 => self.pan115_share(share, parent).await,
+            Provider::Pan123 => self.pan123_share(share, parent).await,
+            Provider::C139 => self.c139_share(share, parent).await,
         }
     }
     pub async fn download(
@@ -39,20 +66,32 @@ impl Session {
         file: &ShareFile,
         token: &str,
     ) -> Result<Download, String> {
+        if self.provider != share.provider || file.is_dir {
+            return Err("下载来源不一致或所选项目为文件夹，请刷新列表".into());
+        }
+        if self.provider == Provider::Pan115 {
+            return self.pan115_share_download(share, file).await;
+        }
         let url = match self.provider {
             Provider::Quark => self.transport.download(share, file, token).await?,
             Provider::Baidu => self.baidu_download(share, file, token).await?,
+            Provider::Pan123 => self.pan123_download(file, Some(share)).await?,
+            Provider::C139 => self.c139_share_download(share, file).await?,
+            Provider::Pan115 => unreachable!(),
         };
         self.download_descriptor(url)
     }
     pub fn download_descriptor(&self, url: String) -> Result<Download, String> {
         let parsed = validate_download(self.provider, &url)?;
         let mut headers = vec![format!("Referer: {}/", self.provider.origin())];
-        if let Some(cookies) = self
-            .transport
-            .jar
-            .cookies(&parsed)
-            .and_then(|v| v.to_str().ok().map(String::from))
+        if let Some(cookies) = matches!(self.provider, Provider::Quark | Provider::Baidu)
+            .then(|| {
+                self.transport
+                    .jar
+                    .cookies(&parsed)
+                    .and_then(|v| v.to_str().ok().map(String::from))
+            })
+            .flatten()
         {
             headers.push(format!("Cookie: {cookies}"));
         }
@@ -62,7 +101,9 @@ impl Session {
             user_agent: match self.provider {
                 Provider::Quark => crate::quark::DOWNLOAD_AGENT,
                 Provider::Baidu => "pan.baidu.com",
-            },
+                _ => crate::quark::USER_AGENT,
+            }
+            .into(),
         })
     }
     pub async fn json(&self, request: reqwest::RequestBuilder) -> Result<Value, String> {
@@ -132,12 +173,37 @@ pub fn parse_share(input: &str, code: &str) -> Result<ShareLink, String> {
         let provider = match host {
             "pan.quark.cn" => Provider::Quark,
             "pan.baidu.com" => Provider::Baidu,
+            "115.com" | "www.115.com" | "115cdn.com" | "www.115cdn.com" | "115rc.com"
+            | "www.115rc.com" | "anxia.com" => Provider::Pan115,
+            "123pan.com" | "www.123pan.com" | "123pan.cn" | "www.123pan.cn" | "123865.com"
+            | "www.123865.com" | "123912.com" | "www.123912.com" => Provider::Pan123,
+            "yun.139.com" => Provider::C139,
+            host if host_matches(host, "share.123pan.cn") => Provider::Pan123,
             _ => continue,
         };
-        let id: Option<String> = if parts.len() == 2
-            && (parts[0] == "s" || (provider == Provider::Quark && parts[0] == "share"))
+        let mut embedded_code = String::new();
+        let id: Option<String> = if provider == Provider::C139 {
+            if url.path().trim_end_matches('/') != "/shareweb" {
+                continue;
+            }
+            url.fragment()
+                .and_then(|fragment| fragment.strip_prefix("/w/i/"))
+                .map(|id| id.split(['?', '&']).next().unwrap_or_default().to_string())
+        } else if provider == Provider::Pan123 && parts.as_slice() == ["api", "srr"] {
+            url.query_pairs()
+                .find(|(key, _)| key == "sk")
+                .map(|(_, value)| value.into_owned())
+        } else if parts.len() == 2
+            && (parts[0] == "s"
+                || (provider == Provider::Quark && parts[0] == "share")
+                || (provider == Provider::Pan123 && parts[0] == "123pan"))
         {
             Some(parts[1].into())
+        } else if provider == Provider::Pan115 && parts.len() == 1 {
+            parts[0].rsplit_once('-').map(|(id, code)| {
+                embedded_code = code.into();
+                id.to_string()
+            })
         } else {
             None
         };
@@ -151,11 +217,27 @@ pub fn parse_share(input: &str, code: &str) -> Result<ShareLink, String> {
         };
         let mut passcode = code.trim().to_string();
         if passcode.is_empty() {
+            passcode = embedded_code;
+        }
+        if passcode.is_empty() {
             passcode = url
                 .query_pairs()
-                .find(|(k, _)| matches!(k.as_ref(), "pwd" | "passcode" | "password" | "accessCode"))
+                .find(|(k, _)| {
+                    matches!(
+                        k.as_ref(),
+                        "pwd" | "passcode" | "password" | "accessCode" | "receive_code"
+                    )
+                })
                 .map(|(_, v)| v.into_owned())
                 .unwrap_or_default();
+        }
+        if passcode.is_empty() {
+            if let Some((_, query)) = url.fragment().and_then(|value| value.split_once('?')) {
+                passcode = url::form_urlencoded::parse(query.as_bytes())
+                    .find(|(key, _)| matches!(key.as_ref(), "pwd" | "password" | "passcode"))
+                    .map(|(_, value)| value.into_owned())
+                    .unwrap_or_default();
+            }
         }
         if passcode.is_empty() {
             passcode = code_pattern
@@ -181,7 +263,7 @@ pub fn parse_share(input: &str, code: &str) -> Result<ShareLink, String> {
             passcode,
         });
     }
-    found.ok_or("请粘贴夸克或百度网盘的有效分享链接".into())
+    found.ok_or("请粘贴夸克、百度、115、123 或 139 的有效分享链接".into())
 }
 
 fn validate_download(provider: Provider, address: &str) -> Result<url::Url, String> {
@@ -195,6 +277,30 @@ fn validate_download(provider: Provider, address: &str) -> Result<url::Url, Stri
             "aliyuncs.com",
         ],
         Provider::Baidu => &["baidu.com", "baidupcs.com", "bcebos.com", "baidubce.com"],
+        Provider::Pan115 => &["115.com", "115cdn.com", "115cdn.net", "anxia.com"],
+        Provider::Pan123 => &[
+            "123pan.com",
+            "123pan.cn",
+            "123pan.net",
+            "123pancloud.com",
+            "123pancloud.cn",
+            "123pancloud.net",
+            "123pan-cdn.com",
+            "123865.com",
+            "123912.com",
+            "123952.com",
+            "123684.com",
+            "p123pan.com",
+            "123pancdn.com",
+        ],
+        Provider::C139 => &[
+            "139.com",
+            "10086.cn",
+            "chinamobile.com",
+            "migu.cn",
+            "myhuaweicloud.com",
+            "cmecloud.cn",
+        ],
     };
     if url.scheme() != "https"
         || !url.username().is_empty()
@@ -224,6 +330,9 @@ mod tests {
         let session = Session {
             provider: share.provider,
             transport: Quark::new().unwrap(),
+            authorization: String::new(),
+            device_id: String::new(),
+            test_endpoint: None,
         };
         let listing = session.list(&share, "0").await.unwrap();
         assert!(

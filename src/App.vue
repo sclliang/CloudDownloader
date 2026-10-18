@@ -4,9 +4,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import DrivePanel from "./DrivePanel.vue";
+import CloudDrivePanel from "./CloudDrivePanel.vue";
+import {
+  type Provider,
+  providers,
+  providerName,
+  shareProvider,
+} from "./providers";
 import UploadPanel from "./UploadPanel.vue";
 import SharePanel from "./SharePanel.vue";
-import ResonatorStage from "./ResonatorStage.vue";
 import DirectDownloadForm from "./DirectDownloadForm.vue";
 import { version } from "../package.json";
 import type { UploadTask, CreatedShare } from "./cloud";
@@ -39,18 +45,6 @@ import {
   X,
 } from "@lucide/vue";
 
-type Provider = "quark" | "baidu";
-const providers: {
-  id: Provider;
-  name: string;
-  initial: string;
-  color: string;
-}[] = [
-  { id: "quark", name: "夸克网盘", initial: "夸", color: "#5972f5" },
-  { id: "baidu", name: "百度网盘", initial: "百", color: "#3179ed" },
-];
-const providerName = (id: Provider) =>
-  providers.find((p) => p.id === id)?.name || id;
 type Account = {
   provider: Provider;
   loggedIn: boolean;
@@ -110,6 +104,8 @@ const state = ref<Snapshot>({
   shares: [],
 });
 const tab = ref("all");
+const driveProvider = ref<Provider>("quark");
+const driveBusy = ref(false);
 const downloadMode = ref<"share" | "direct">("share");
 const directBusy = ref(false);
 const directForm = ref<InstanceType<typeof DirectDownloadForm> | null>(null);
@@ -131,8 +127,7 @@ const connectedCount = computed(
 );
 const currentProvider = computed<Provider>(
   () =>
-    listing.value?.share.provider ||
-    (shareText.value.includes("pan.baidu.com") ? "baidu" : "quark"),
+    listing.value?.share.provider || shareProvider(shareText.value) || "quark",
 );
 const currentAccount = computed(() => accountFor(currentProvider.value));
 const listing = ref<Listing | null>(null);
@@ -145,6 +140,9 @@ const toast = ref("");
 const filter = ref("");
 const pendingAction = ref<string | null>(null);
 const removeTarget = ref<Task | null>(null);
+const deleteLocalFiles = ref(false);
+const removing = ref(false);
+const removeError = ref("");
 let interval: ReturnType<typeof setInterval> | undefined;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let unlisten: UnlistenFn | undefined;
@@ -377,11 +375,35 @@ async function action(task: Task, action: string) {
     pendingAction.value = null;
   }
 }
+function confirmRemove(task: Task) {
+  deleteLocalFiles.value = false;
+  removeError.value = "";
+  removeTarget.value = task;
+}
 async function remove() {
-  if (removeTarget.value) {
-    const task = removeTarget.value;
+  const task = removeTarget.value;
+  if (!task || removing.value) return;
+  removing.value = true;
+  removeError.value = "";
+  pendingAction.value = task.id;
+  try {
+    await invoke("task_action", {
+      id: task.id,
+      action: "remove",
+      deleteFiles: deleteLocalFiles.value,
+    });
     removeTarget.value = null;
-    await action(task, "remove");
+    notice(
+      deleteLocalFiles.value
+        ? "任务及本地文件已删除"
+        : "任务已移除，本地文件已保留",
+    );
+  } catch (e) {
+    removeError.value = String(e);
+  } finally {
+    removing.value = false;
+    pendingAction.value = null;
+    await refresh();
   }
 }
 async function folder(id?: string) {
@@ -413,7 +435,7 @@ onUnmounted(() => {
         <span class="brand-mark"
           ><ArrowDownToLine :size="24" :stroke-width="2.7"
         /></span>
-        <div>CloudDownloader<small>鸣潮 · 云盘终端</small></div>
+        <div>CloudDownloader<small>云盘与文件下载</small></div>
       </div>
       <button
         class="new-button"
@@ -499,18 +521,17 @@ onUnmounted(() => {
         </div>
       </div>
     </aside>
-    <main class="main-content">
-      <ResonatorStage />
+    <main class="main-content" :class="{ 'drive-workspace': tab === 'drive' }">
       <header class="page-header">
         <div class="page-heading-copy">
-          <div class="eyebrow">
-            <span></span> WUTHERING WAVES · CLOUD TERMINAL
-          </div>
+          <div class="eyebrow">CLOUD DOWNLOADER</div>
           <h1>{{ title }}</h1>
           <p>
             {{
               tab === "drive"
-                ? "浏览百度网盘文件，上传、下载和分享。"
+                ? driveProvider === "baidu"
+                  ? "浏览百度网盘文件，上传、下载和分享。"
+                  : `浏览${providerName(driveProvider)}，选择文件或文件夹下载到本地。`
                 : tab === "uploads"
                   ? "分片并发传输，随时掌握上传进度。"
                   : tab === "shares"
@@ -534,29 +555,66 @@ onUnmounted(() => {
           <X :size="16" />
         </button>
       </div>
-      <DrivePanel
-        v-if="tab === 'drive'"
-        :download-dir="state.downloadDir"
-        @notice="notice"
-        @error="error = $event"
-        @login="login('baidu')"
-        @changed="refresh"
-        @directory="chooseDirectory"
-        @downloaded="
-          tab = 'all';
-          refresh();
-        "
-        @uploaded="
-          tab = 'uploads';
-          refresh();
-        "
-      />
+      <template v-if="tab === 'drive'">
+        <div class="drive-providers" role="group" aria-label="选择个人网盘">
+          <button
+            v-for="provider in providers"
+            :key="provider.id"
+            :class="{ selected: driveProvider === provider.id }"
+            :aria-pressed="driveProvider === provider.id"
+            :disabled="driveBusy"
+            @click="driveProvider = provider.id"
+          >
+            <span
+              class="drive-provider-dot"
+              :style="{ background: provider.color }"
+            ></span
+            >{{ provider.name }}
+          </button>
+        </div>
+        <DrivePanel
+          v-if="driveProvider === 'baidu'"
+          :download-dir="state.downloadDir"
+          @notice="notice"
+          @error="error = $event"
+          @login="login('baidu')"
+          @changed="refresh"
+          @directory="chooseDirectory"
+          @downloaded="
+            tab = 'all';
+            refresh();
+          "
+          @uploaded="
+            tab = 'uploads';
+            refresh();
+          "
+        />
+        <CloudDrivePanel
+          v-else
+          :key="driveProvider"
+          :provider="driveProvider"
+          :connected="accountFor(driveProvider).loggedIn"
+          :download-dir="state.downloadDir"
+          @login="login(driveProvider)"
+          @notice="notice"
+          @changed="refresh"
+          @directory="chooseDirectory"
+          @busy="driveBusy = $event"
+          @downloaded="
+            tab = 'all';
+            refresh();
+          "
+        />
+      </template>
       <UploadPanel
         v-else-if="tab === 'uploads'"
         :tasks="state.uploads"
         @changed="refresh"
         @error="error = $event"
-        @browse="tab = 'drive'"
+        @browse="
+          driveProvider = 'baidu';
+          tab = 'drive';
+        "
       />
       <SharePanel
         v-else-if="tab === 'shares'"
@@ -564,7 +622,10 @@ onUnmounted(() => {
         @changed="refresh"
         @error="error = $event"
         @notice="notice"
-        @browse="tab = 'drive'"
+        @browse="
+          driveProvider = 'baidu';
+          tab = 'drive';
+        "
       />
       <template v-else-if="tab === 'account'">
         <p class="account-intro">
@@ -652,7 +713,7 @@ onUnmounted(() => {
             <textarea
               ref="shareInput"
               v-model="shareText"
-              placeholder="粘贴夸克或百度分享链接，自动识别网盘和提取码…"
+              placeholder="粘贴夸克、百度、115、123 或 139 分享链接，自动识别网盘和提取码…"
               aria-label="网盘分享链接"
               spellcheck="false"
               :disabled="adding"
@@ -917,10 +978,10 @@ onUnmounted(() => {
                   <FolderOpen :size="17" /></button
                 ><button
                   class="icon-button"
-                  title="移除任务记录"
-                  aria-label="移除任务记录"
+                  title="删除下载任务"
+                  aria-label="删除下载任务"
                   :disabled="task.status === 'resolving'"
-                  @click="removeTarget = task"
+                  @click="confirmRemove(task)"
                 >
                   <Trash2 :size="17" /></button
               ></template>
@@ -942,21 +1003,56 @@ onUnmounted(() => {
     <div
       v-if="removeTarget"
       class="modal-backdrop"
-      @click.self="removeTarget = null"
+      @click.self="!removing && (removeTarget = null)"
     >
       <section
-        class="confirm-dialog"
+        class="confirm-dialog remove-task-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="remove-title"
       >
         <span class="dialog-icon"><Trash2 :size="24" /></span>
         <h2 id="remove-title">移除这个下载任务？</h2>
-        <p>任务会停止，并从列表中移除。已下载的文件会保留在本地。</p>
+        <p class="remove-task-name">{{ removeTarget.name }}</p>
+        <p>任务会停止，并从列表中移除。</p>
+        <label class="remove-files-option">
+          <input
+            v-model="deleteLocalFiles"
+            type="checkbox"
+            :disabled="removing"
+          />
+          <span>同时删除本地文件</span>
+        </label>
+        <p class="remove-files-note" :class="{ destructive: deleteLocalFiles }">
+          {{
+            deleteLocalFiles
+              ? "将永久删除已下载或未完成的文件及续传信息，无法恢复。"
+              : "未勾选时，已下载的文件和续传信息会保留。"
+          }}
+        </p>
+        <p class="remove-file-path" :title="removeTarget.directory">
+          保存位置：{{ removeTarget.directory }}
+        </p>
+        <p v-if="removeError" class="remove-task-error" role="alert">
+          {{ removeError }}
+        </p>
         <div class="button-row">
-          <button class="secondary" @click="removeTarget = null">
+          <button
+            class="secondary"
+            :disabled="removing"
+            @click="removeTarget = null"
+          >
             保留任务</button
-          ><button class="danger" @click="remove">移除任务</button>
+          ><button class="danger" :disabled="removing" @click="remove">
+            <LoaderCircle v-if="removing" :size="15" class="spinning" />
+            {{
+              removing
+                ? "正在删除…"
+                : deleteLocalFiles
+                  ? "删除任务及文件"
+                  : "仅移除任务"
+            }}
+          </button>
         </div>
       </section>
     </div>

@@ -6,38 +6,62 @@ pub enum Provider {
     #[default]
     Quark,
     Baidu,
+    Pan115,
+    Pan123,
+    C139,
 }
 
 impl Provider {
-    pub const ALL: [Self; 2] = [Self::Quark, Self::Baidu];
+    pub const ALL: [Self; 5] = [
+        Self::Quark,
+        Self::Baidu,
+        Self::Pan115,
+        Self::Pan123,
+        Self::C139,
+    ];
     pub fn key(self) -> &'static str {
         match self {
             Self::Quark => "quark",
             Self::Baidu => "baidu",
+            Self::Pan115 => "pan115",
+            Self::Pan123 => "pan123",
+            Self::C139 => "c139",
         }
     }
     pub fn name(self) -> &'static str {
         match self {
             Self::Quark => "夸克网盘",
             Self::Baidu => "百度网盘",
+            Self::Pan115 => "115 网盘",
+            Self::Pan123 => "123 云盘",
+            Self::C139 => "139 云盘",
         }
     }
     pub fn origin(self) -> &'static str {
         match self {
             Self::Quark => "https://pan.quark.cn",
             Self::Baidu => "https://pan.baidu.com",
+            Self::Pan115 => "https://115.com",
+            Self::Pan123 => "https://yun.123pan.cn",
+            Self::C139 => "https://yun.139.com",
         }
     }
     pub fn login_url(self) -> &'static str {
         match self {
             Self::Quark => "https://pan.quark.cn/list#/list/all",
             Self::Baidu => "https://pan.baidu.com/disk/main#/index?category=all",
+            Self::Pan115 => "https://115.com/",
+            Self::Pan123 => "https://yun.123pan.cn/",
+            Self::C139 => "https://yun.139.com/w/",
         }
     }
     pub fn allows_navigation(self, url: &url::Url) -> bool {
         let domains: &[&str] = match self {
             Self::Quark => &["quark.cn", "uc.cn", "quark.com", "alipay.com"],
             Self::Baidu => &["baidu.com"],
+            Self::Pan115 => &["115.com", "115cdn.com", "115rc.com", "anxia.com"],
+            Self::Pan123 => &["123pan.com", "123pan.cn", "123865.com", "123912.com"],
+            Self::C139 => &["139.com", "10086.cn", "cmpassport.com", "chinamobile.com"],
         };
         url.scheme() == "https"
             && domains

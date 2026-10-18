@@ -12,11 +12,11 @@ try {
     }
     cargo fmt --manifest-path src-tauri/Cargo.toml --check
     if ($LASTEXITCODE -ne 0) { throw 'Rust 格式检查失败' }
-    cargo test --manifest-path src-tauri/Cargo.toml --lib
+    cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw 'Rust 测试失败' }
-    npm.cmd run tauri build
+    node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis
     if ($LASTEXITCODE -ne 0) { throw 'Tauri 构建失败' }
-    & (Join-Path $PSScriptRoot 'package.ps1')
+    & (Join-Path $PSScriptRoot 'package.ps1') -IncludeInstaller
 } finally {
     Pop-Location
 }

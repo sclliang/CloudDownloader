@@ -172,6 +172,41 @@ async fn direct_parallel_ranges_and_non_range_restart_preserve_bytes() {
         *bytes
     );
 
+    // The generic cloud entry point is shared by all five providers. Verify its
+    // inherited 16-connection policy through real ranged requests, independently
+    // of the direct-download connection override above.
+    peak.store(0, Ordering::SeqCst);
+    let gid = engine
+        .rpc
+        .add(
+            &format!("http://{address}/range"),
+            &directory.to_string_lossy(),
+            "cloud.bin",
+            &["If-Match: \"direct-v1\"".into()],
+            "CloudDownloader-fixture",
+        )
+        .await
+        .unwrap();
+    let options = engine
+        .rpc
+        .call("aria2.getOption", vec![json!(gid)])
+        .await
+        .unwrap();
+    assert_eq!(options["split"], "16");
+    assert_eq!(options["max-connection-per-server"], "16");
+    assert_eq!(options["min-split-size"], (1024 * 1024).to_string());
+    complete(&engine.rpc, &gid).await;
+    assert!(
+        peak.load(Ordering::SeqCst) > 4,
+        "Cloud downloads must be able to exceed four concurrent connections"
+    );
+    assert_eq!(std::fs::read(directory.join("cloud.bin")).unwrap(), *bytes);
+
+    // Start the throttled case with fresh bandwidth counters instead of counting
+    // the preceding unthrottled 24 MiB transfer against its new global limit.
+    drop(engine);
+    let engine = Engine::start().unwrap();
+    ready(&engine.rpc).await;
     engine
         .rpc
         .call(
@@ -197,7 +232,7 @@ async fn direct_parallel_ranges_and_non_range_restart_preserve_bytes() {
         .unwrap();
     assert_eq!(options["max-connection-per-server"], "1");
     let mut partial = false;
-    for _ in 0..100 {
+    for _ in 0..300 {
         let value = status(&engine.rpc, &gid).await;
         assert_ne!(value["status"], "error", "{value}");
         let n = value["completedLength"]
@@ -211,7 +246,11 @@ async fn direct_parallel_ranges_and_non_range_restart_preserve_bytes() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(partial);
+    assert!(
+        partial,
+        "Expected an incomplete download with at least 512 KiB transferred: {}",
+        status(&engine.rpc, &gid).await
+    );
     engine
         .rpc
         .call("aria2.forcePause", vec![json!(gid)])
@@ -245,9 +284,49 @@ async fn direct_parallel_ranges_and_non_range_restart_preserve_bytes() {
         0,
         "Direct requests must not contain cloud credentials"
     );
+    // Removing an active task must release its files before local cleanup.
+    let removal_gid = resumed
+        .rpc
+        .call(
+            "aria2.addUri",
+            vec![
+                json!([format!("http://{address}/range")]),
+                json!({"dir":directory, "out":"remove.bin", "max-download-limit":"1M",
+            "header":["If-Match: \"direct-v1\""]}),
+            ],
+        )
+        .await
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut started = false;
+    for _ in 0..150 {
+        let value = status(&resumed.rpc, &removal_gid).await;
+        if value["completedLength"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            > 0
+        {
+            assert_eq!(value["status"], "active");
+            started = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(started, "removal fixture did not start transferring");
+    resumed.rpc.stop_for_removal(&removal_gid).await.unwrap();
+    std::fs::remove_file(directory.join("remove.bin")).unwrap();
+    std::fs::remove_file(directory.join("remove.bin.aria2")).unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(!directory.join("remove.bin").exists());
+    assert!(!directory.join("remove.bin.aria2").exists());
     drop(resumed);
     server.abort();
     std::fs::remove_file(directory.join("parallel.bin")).unwrap();
+    std::fs::remove_file(directory.join("cloud.bin")).unwrap();
     std::fs::remove_file(directory.join("plain.bin")).unwrap();
     std::fs::remove_dir(directory).unwrap();
 }

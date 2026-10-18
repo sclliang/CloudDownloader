@@ -1,0 +1,20 @@
+Cloud protocol references reviewed on 2026-10-18
+
+YunX-Desktop: https://github.com/tidain/YunX-Desktop
+Reviewed revision: 24d96a13eba941433f3c9d3b3dc5d8e93704315d
+Reference project license: GNU Affero General Public License version 3.0
+License: https://github.com/tidain/YunX-Desktop/blob/24d96a13eba941433f3c9d3b3dc5d8e93704315d/LICENSE
+Copyright: the YunX-Desktop authors and contributors (see upstream repository).
+
+References: Pan115Api, Pan115Constants, Pan115Crypto, Pan123Api,
+Pan123Constants, C139Api, C139Constants and QuarkApi interface descriptions.
+These references describe endpoint paths, request fields, response shapes,
+protocol constants, signatures, and encryption framing used by the providers.
+CloudDownloader implements native Rust adapters for these wire protocols;
+the release does not include or run YunX-Desktop binaries or Kotlin sources.
+
+115 direct share endpoint reference:
+https://github.com/AlistGo/alist/issues/5384
+
+Protocol test fixtures contain synthetic account IDs, file IDs and URLs.
+They are verified locally and do not establish live provider compatibility.
