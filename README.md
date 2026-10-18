@@ -10,9 +10,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sclliang/CloudDownloader/releases/latest"><img src="https://img.shields.io/github/v/release/sclliang/CloudDownloader?style=flat-square&amp;label=Release&amp;color=8B68C4" alt="最新正式版本" /></a>
-  <img src="https://img.shields.io/badge/Windows-10%20%2F%2011%20%C2%B7%20x64-6A78B8?style=flat-square" alt="Windows 10 / 11 x64" />
-  <img src="https://img.shields.io/badge/Theme-Light%20%2F%20Night-A283C6?style=flat-square" alt="淡紫日间与 Night 主题" />
+  <a href="https://github.com/sclliang/CloudDownloader/releases/latest"><img src="https://img.shields.io/github/v/release/sclliang/CloudDownloader?style=flat-square&amp;label=Release&amp;color=2278E5" alt="最新正式版本" /></a>
+  <img src="https://img.shields.io/badge/Windows-10%20%2F%2011%20%C2%B7%20x64-2278E5?style=flat-square" alt="Windows 10 / 11 x64" />
+  <img src="https://img.shields.io/badge/Theme-Light%20%2F%20Night-2278E5?style=flat-square" alt="蓝白日间与 Night 主题" />
 </p>
 
 <p align="center">
@@ -27,10 +27,12 @@
 
 ## 下载
 
+最新版本 **0.5.7**：全新蓝白界面与深灰 Night 主题，统一管理直链、网盘和 BT 下载。
+
 | Windows 安装版 · 推荐                 | 便携版                                 |
 | :------------------------------------ | :------------------------------------- |
 | 自动创建快捷方式，适合日常使用。      | 解压即可运行，保留完整目录结构。       |
-| **[↓ 下载 v0.5.6 安装包][installer]** | **[↓ 下载 v0.5.6 便携 ZIP][portable]** |
+| **[↓ 下载 v0.5.7 安装包][installer]** | **[↓ 下载 v0.5.7 便携 ZIP][portable]** |
 
 [全部版本与更新说明][releases] · [SHA-256 校验文件][checksums]
 
@@ -38,7 +40,7 @@
 
 ## 界面预览
 
-**淡紫日间 · 统一入口与多来源任务**
+**蓝白日间 · 统一入口与多来源任务**
 
 ![统一下载框与多来源任务：文件直链、网盘和 BT 下载集中管理](docs/images/download-light.png)
 
@@ -62,7 +64,7 @@
 | **多连接与续传**        | HTTP / HTTPS 最多 16 路连接，支持分段检测、暂停、继续与重试。    |
 | **BT 磁力与种子**       | 支持 v1 / 混合种子、选文件下载、节点数设置、上传限速和可选做种。 |
 | **百度上传与分享**      | 分片上传、拖放文件、新建文件夹、创建分享与管理本机分享记录。     |
-| **淡紫 / Night 双主题** | 右上角一键切换并记住选择；关闭窗口后可在托盘继续下载。           |
+| **日间 / Night 双主题** | 右上角一键切换并记住选择；关闭窗口后可在托盘继续下载。           |
 | **按需清理本地文件**    | 删除任务时自行选择是否删除本地文件，默认保留。                   |
 
 ## 支持的网盘
@@ -133,13 +135,15 @@ npm run tauri dev -- --no-watch
 
 ## 文档与致谢
 
-[使用指南](docs/usage.md) · [开发文档](docs/development.md) · [验证记录](VERIFICATION.md) · [更新说明](docs/release-0.5.6.md) · [第三方许可](third-party/notices/)
+[使用指南](docs/usage.md) · [开发文档](docs/development.md) · [验证记录](VERIFICATION.md) · [更新说明](docs/release-0.5.7.md) · [第三方许可](third-party/notices/)
+
+界面布局与蓝白配色参考 [Motrix](https://github.com/agalwood/Motrix)，保留本项目的统一下载入口与多网盘工作区。
 
 网盘协议流程参考 [CYQawa/YunX](https://github.com/CYQawa/YunX) 与 [YunX-Desktop](https://github.com/tidain/YunX-Desktop)，以 Rust 实现适配器。参考版本和许可出处见[协议资料](third-party/notices/cloud-protocol-sources.txt)。
 
 <p align="center"><sub>sixunited · 作者 <a href="https://github.com/sclliang">sclliang</a></sub></p>
 
-[installer]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.6/CloudDownloader_0.5.6_x64-setup.exe
-[portable]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.6/CloudDownloader-0.5.6-win-x64.zip
-[checksums]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.6/SHA256SUMS-0.5.6.txt
+[installer]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.7/CloudDownloader_0.5.7_x64-setup.exe
+[portable]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.7/CloudDownloader-0.5.7-win-x64.zip
+[checksums]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.7/SHA256SUMS-0.5.7.txt
 [releases]: https://github.com/sclliang/CloudDownloader/releases

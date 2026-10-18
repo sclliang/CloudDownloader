@@ -25,6 +25,10 @@ import {
   CircleCheck,
   CloudDownload,
   File,
+  FileArchive,
+  FileImage,
+  FileText,
+  Music2,
   FileVideo,
   Folder,
   FolderOpen,
@@ -129,6 +133,11 @@ const failed = computed(() =>
 const speed = computed(() =>
   state.value.tasks.reduce((sum, t) => sum + t.speed, 0),
 );
+const uploadSpeed = computed(
+  () =>
+    state.value.tasks.reduce((sum, t) => sum + (t.uploadSpeed || 0), 0) +
+    state.value.uploads.reduce((sum, t) => sum + t.speed, 0),
+);
 const tasks = computed(() =>
   state.value.tasks.filter(
     (t) =>
@@ -142,7 +151,7 @@ const tasks = computed(() =>
 const title = computed(
   () =>
     ({
-      all: "下载工作台",
+      all: "全部下载",
       active: "正在下载",
       complete: "已完成",
       error: "需要处理",
@@ -176,8 +185,32 @@ const statusName = (status: string) =>
     removed: "已移除",
     cancelled: "已取消",
   })[status] || status;
+const fileKind = (name: string) => {
+  if (/\.(mp4|mkv|avi|mov|webm|flv|ts)$/i.test(name)) return "video";
+  if (/\.(zip|rar|7z|tar|gz|iso|exe|msi)$/i.test(name)) return "archive";
+  if (/\.(png|jpg|jpeg|gif|webp|svg|heic)$/i.test(name)) return "image";
+  if (/\.(mp3|wav|flac|aac|ogg|m4a)$/i.test(name)) return "audio";
+  if (/\.(pdf|docx?|xlsx?|pptx?|txt|md|csv)$/i.test(name)) return "document";
+  return "file";
+};
 const fileIcon = (name: string) =>
-  /\.(mp4|mkv|avi|mov|webm|flv|ts)$/i.test(name) ? FileVideo : File;
+  ({
+    video: FileVideo,
+    archive: FileArchive,
+    image: FileImage,
+    audio: Music2,
+    document: FileText,
+    file: File,
+  })[fileKind(name)];
+const remaining = (task: Task) => {
+  if (!task.speed || task.size <= task.completed) return "";
+  const seconds = Math.ceil((task.size - task.completed) / task.speed);
+  return seconds < 60
+    ? `剩余 ${seconds} 秒`
+    : seconds < 3600
+      ? `剩余 ${Math.ceil(seconds / 60)} 分钟`
+      : `剩余 ${(seconds / 3600).toFixed(1)} 小时`;
+};
 function notice(message: string) {
   toast.value = message;
   clearTimeout(toastTimer);
@@ -312,7 +345,7 @@ onUnmounted(() => {
         <span class="brand-mark"
           ><ArrowDownToLine :size="24" :stroke-width="2.7"
         /></span>
-        <div>CloudDownloader<small>云盘与文件下载</small></div>
+        <div>CloudDownloader<small>让下载，简单一点</small></div>
       </div>
       <button
         class="new-button"
@@ -393,11 +426,23 @@ onUnmounted(() => {
         </div>
       </div>
     </aside>
-    <main class="main-content" :class="{ 'drive-workspace': tab === 'drive' }">
+    <main
+      class="main-content"
+      :class="{
+        'drive-workspace': tab === 'drive',
+        'task-workspace': ['all', 'active', 'complete', 'error'].includes(tab),
+      }"
+    >
       <header class="page-header">
         <div class="page-heading-copy">
-          <div class="eyebrow">CLOUD DOWNLOADER</div>
-          <h1>{{ title }}</h1>
+          <div class="page-title-row">
+            <h1>{{ title }}</h1>
+            <span
+              v-if="['all', 'active', 'complete', 'error'].includes(tab)"
+              class="page-count"
+              >{{ tasks.length }}</span
+            >
+          </div>
           <p>
             {{
               tab === "drive"
@@ -408,18 +453,22 @@ onUnmounted(() => {
                   ? "分片并发传输，随时掌握上传进度。"
                   : tab === "shares"
                     ? "管理通过本程序创建的百度分享链接。"
-                    : "文件直链、网盘分享与 BT 下载，让文件抵达本地。"
+                    : tab === "account"
+                      ? "连接你的网盘，文件触手可及。"
+                      : "所有下载，一个地方。"
             }}
           </p>
         </div>
-        <span
+        <button
           class="connection-badge"
           :class="{ connected: connectedCount > 0 }"
-          ><i></i
-          >{{
-            connectedCount ? `${connectedCount} 个网盘已连接` : "尚未登录"
-          }}</span
+          title="管理网盘账号"
+          @click="tab = 'account'"
         >
+          <i></i
+          >{{ connectedCount ? `${connectedCount} 个网盘已连接` : "尚未登录"
+          }}<ChevronRight :size="13" />
+        </button>
       </header>
       <div v-if="error || state.engineError" class="error-banner" role="alert">
         <CircleAlert :size="18" /><span>{{ error || state.engineError }}</span
@@ -553,8 +602,8 @@ onUnmounted(() => {
         />
         <div class="task-heading">
           <div>
-            <h2>下载列表</h2>
-            <span>{{ state.tasks.length }} 个任务</span>
+            <h2>传输任务</h2>
+            <span>{{ tasks.length }} 项</span>
           </div>
           <div class="speed-label" v-if="speed">
             <ArrowDown :size="14" />{{ bytes(speed) }}/s
@@ -583,7 +632,7 @@ onUnmounted(() => {
                       ? "目前没有需要处理的任务"
                       : tab === "active"
                         ? "目前没有正在下载的任务"
-                        : "你的下一份文件，从这里出发"
+                        : "还没有下载任务"
               }}
             </h3>
             <p>
@@ -602,8 +651,13 @@ onUnmounted(() => {
               >
             </div>
           </div>
-          <article v-for="task in tasks" :key="task.id" class="task-row">
-            <div class="task-file-icon">
+          <article
+            v-for="task in tasks"
+            :key="task.id"
+            class="task-row"
+            :class="task.status"
+          >
+            <div class="task-file-icon" :class="fileKind(task.name)">
               <component :is="fileIcon(task.name)" :size="25" />
             </div>
             <div class="task-details">
@@ -638,7 +692,6 @@ onUnmounted(() => {
                       ? bytes(task.size)
                       : "未知大小"
                   }}</span
-                ><span v-if="task.speed">{{ bytes(task.speed) }}/s</span
                 ><span v-if="task.status === 'complete'"
                   ><Check :size="12" />已保存到本地</span
                 ><span v-else-if="task.size"
@@ -662,6 +715,25 @@ onUnmounted(() => {
               </p>
               <p v-if="task.error" class="task-error">{{ task.error }}</p>
             </div>
+            <div
+              class="task-rate"
+              v-if="task.speed || task.status === 'seeding'"
+            >
+              <strong
+                >{{
+                  bytes(
+                    task.status === "seeding"
+                      ? task.uploadSpeed || 0
+                      : task.speed,
+                  )
+                }}<small>/s</small></strong
+              >
+              <span>{{
+                task.status === "seeding"
+                  ? "正在做种"
+                  : remaining(task) || "正在传输"
+              }}</span>
+            </div>
             <div class="task-actions">
               <LoaderCircle
                 v-if="pendingAction === task.id"
@@ -670,7 +742,7 @@ onUnmounted(() => {
               /><template v-else
                 ><button
                   v-if="['active', 'waiting', 'seeding'].includes(task.status)"
-                  class="icon-button"
+                  class="icon-button task-main-action"
                   title="暂停下载"
                   aria-label="暂停下载"
                   @click="action(task, 'pause')"
@@ -678,7 +750,7 @@ onUnmounted(() => {
                   <Pause :size="17" /></button
                 ><button
                   v-if="['paused', 'error', 'cancelled'].includes(task.status)"
-                  class="icon-button"
+                  class="icon-button task-main-action"
                   :title="
                     task.status === 'error'
                       ? task.direct
@@ -709,11 +781,20 @@ onUnmounted(() => {
             </div>
           </article>
         </section>
-        <div class="bottom-note">
-          <ShieldCheck :size="14" /><span
-            >关闭窗口后在托盘继续下载 · 右键托盘图标可退出程序</span
+        <footer class="transfer-footer">
+          <span class="transfer-rate"
+            ><ArrowDown :size="14" />{{ bytes(speed) }}/s</span
           >
-        </div>
+          <span class="transfer-rate"
+            ><ArrowUpFromLine :size="14" />{{ bytes(uploadSpeed) }}/s</span
+          >
+          <span class="tray-hint">关闭窗口后在托盘继续下载</span>
+          <span class="footer-engine"
+            ><i :class="{ ready: state.engineRunning }" />{{
+              state.engineRunning ? "引擎已就绪" : "引擎未就绪"
+            }}</span
+          >
+        </footer>
       </template>
     </main>
     <Transition name="toast"

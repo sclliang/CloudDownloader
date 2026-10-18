@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CloudDownloader",
   "mainBinaryName": "CloudDownloader",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "identifier": "com.sixunited.clouddownloader",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -23,7 +23,7 @@
         "center": true,
         "dragDropEnabled": true,
         "additionalBrowserArgs": "--force-renderer-accessibility",
-        "backgroundColor": "#F8F6FC",
+        "backgroundColor": "#EAF5FC",
         "theme": "Light"
       }
     ],

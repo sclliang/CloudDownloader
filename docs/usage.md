@@ -1,8 +1,8 @@
 # 使用指南
 
-下载 [v0.5.6 Release](https://github.com/sclliang/CloudDownloader/releases/tag/v0.5.6)：[Windows 安装版](https://github.com/sclliang/CloudDownloader/releases/download/v0.5.6/CloudDownloader_0.5.6_x64-setup.exe) · [便携版](https://github.com/sclliang/CloudDownloader/releases/download/v0.5.6/CloudDownloader-0.5.6-win-x64.zip) · [SHA-256 校验](https://github.com/sclliang/CloudDownloader/releases/download/v0.5.6/SHA256SUMS-0.5.6.txt)。
+下载 [v0.5.7 Release](https://github.com/sclliang/CloudDownloader/releases/tag/v0.5.7)：[Windows 安装版](https://github.com/sclliang/CloudDownloader/releases/download/v0.5.7/CloudDownloader_0.5.7_x64-setup.exe) · [便携版](https://github.com/sclliang/CloudDownloader/releases/download/v0.5.7/CloudDownloader-0.5.7-win-x64.zip) · [SHA-256 校验](https://github.com/sclliang/CloudDownloader/releases/download/v0.5.7/SHA256SUMS-0.5.7.txt)。
 
-1. 推荐运行 `CloudDownloader_0.5.6_x64-setup.exe` 中文安装包，默认安装到当前用户目录并创建快捷方式，缺少 WebView2 时会从微软下载运行时。也可解压便携版压缩包后运行 `CloudDownloader.exe`，移动时保留完整目录结构。
+1. 推荐运行 `CloudDownloader_0.5.7_x64-setup.exe` 中文安装包，默认安装到当前用户目录并创建快捷方式，缺少 WebView2 时会从微软下载运行时。也可解压便携版压缩包后运行 `CloudDownloader.exe`，移动时保留完整目录结构。
 2. 「新建下载」只有一个输入框：粘贴 HTTP/HTTPS 文件直链、网盘分享文字或 `magnet:?xt=urn:btih:…` 磁力链接，程序自动识别类型，点击「解析链接」预览文件。也可点击「导入种子」选择本地 `.torrent` 文件，种子的 HTTP/HTTPS 地址直接粘贴即可。
 3. 网盘分享自动识别提取码，可手动补充。需要登录的网盘在官方窗口自行完成登录；蓝奏云、优享版和 UC 分享可先尝试免登录，服务端要求登录时再连接账号。
 4. 普通文件可改文件名及连接数；网盘和 BT 可以选择文件，网盘还可浏览子文件夹。确认保存目录后点击「开始下载」。磁力解析可取消，获取元数据阶段不下载文件内容。
@@ -13,9 +13,9 @@
 
 ## 主题切换
 
-- 标题栏右上角、最小化按钮左侧的月亮／太阳按钮可在淡紫色日间主题和 Night 主题间切换，自动记住选择，重启后恢复。
+- 标题栏右上角、最小化按钮左侧的月亮／太阳按钮可在蓝白日间主题和 Night 主题间切换，自动记住选择，重启后恢复。
 - Night 主题统一覆盖导航、文件列表、传输任务、输入框和弹窗；主题仅影响本程序主窗口。
-- 淡紫导航与页面背景、白色圆角卡片和紫色操作按钮，下载、网盘、上传、分享及弹窗使用统一配色。
+- 浅蓝导航、白色工作区和蓝色操作按钮，下载、网盘、上传、分享及弹窗使用统一配色。
 - 移除原有游戏文案、角色立绘与切换功能，文件列表使用完整内容宽度。
 - 窗口标题栏、应用图标和托盘提示与通用下载工具风格保持一致；窄窗口及较低窗口高度下自动调整布局。
 

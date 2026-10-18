@@ -328,7 +328,7 @@ async function download() {
       <textarea
         ref="input"
         v-model="text"
-        placeholder="粘贴文件直链、网盘分享或 magnet 磁力链接，也可导入 .torrent 种子…"
+        placeholder="粘贴下载链接，自动识别文件直链、网盘分享或磁力链接…"
         aria-label="下载链接"
         spellcheck="false"
         :disabled="adding"
@@ -557,7 +557,7 @@ async function download() {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 14px 12px;
+  padding: 3px 10px 10px 14px;
   flex-wrap: wrap;
 }
 .unified-passcode {
@@ -569,7 +569,9 @@ async function download() {
   font-size: 12px;
 }
 .unified-passcode input {
-  width: 104px;
+  width: 90px;
+  font-size: 11px;
+  padding: 6px 8px;
 }
 .unified-controls input,
 .unified-options input,
@@ -657,6 +659,6 @@ async function download() {
   white-space: nowrap;
 }
 .unified-download textarea {
-  min-height: 84px;
+  min-height: 58px;
 }
 </style>

@@ -26,7 +26,7 @@ export async function syncWindowTheme() {
   const window = getCurrentWindow();
   await window.setTheme(theme.value === "night" ? "dark" : "light");
   await window.setBackgroundColor(
-    theme.value === "night" ? "#15121e" : "#f8f6fc",
+    theme.value === "night" ? "#171c24" : "#eaf5fc",
   );
 }
 

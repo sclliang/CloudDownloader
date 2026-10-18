@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "clouddownloader"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "aes",
  "base64 0.22.1",

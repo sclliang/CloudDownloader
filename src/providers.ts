@@ -15,14 +15,14 @@ export const providers: {
   initial: string;
   color: string;
 }[] = [
-  { id: "quark", name: "夸克网盘", initial: "夸", color: "#7165c8" },
-  { id: "baidu", name: "百度网盘", initial: "百", color: "#6784c8" },
-  { id: "pan115", name: "115 网盘", initial: "115", color: "#7d6ac0" },
-  { id: "pan123", name: "123 云盘", initial: "123", color: "#8a70bd" },
-  { id: "c139", name: "139 云盘", initial: "139", color: "#769d93" },
-  { id: "uc", name: "UC 网盘", initial: "UC", color: "#bd845f" },
-  { id: "lanzou", name: "蓝奏云", initial: "蓝", color: "#6286ba" },
-  { id: "ilanzou", name: "蓝奏云优享版", initial: "优", color: "#658fa3" },
+  { id: "quark", name: "夸克网盘", initial: "夸", color: "#397cf3" },
+  { id: "baidu", name: "百度网盘", initial: "百", color: "#388cf8" },
+  { id: "pan115", name: "115 网盘", initial: "115", color: "#287bd7" },
+  { id: "pan123", name: "123 云盘", initial: "123", color: "#3671e4" },
+  { id: "c139", name: "139 云盘", initial: "139", color: "#27a380" },
+  { id: "uc", name: "UC 网盘", initial: "UC", color: "#e18b3b" },
+  { id: "lanzou", name: "蓝奏云", initial: "蓝", color: "#428ccf" },
+  { id: "ilanzou", name: "蓝奏云优享版", initial: "优", color: "#319ba7" },
 ];
 export const anonymousShare = (id: Provider) =>
   ["uc", "lanzou", "ilanzou"].includes(id);
