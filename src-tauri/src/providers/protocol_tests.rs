@@ -96,6 +96,18 @@ fn new_share_routes_and_code_precedence() {
             "",
         ),
         (
+            "https://www.123295.com/s/Fixture-123?pwd=Ab12",
+            Provider::Pan123,
+            "Fixture-123",
+            "Ab12",
+        ),
+        (
+            "https://123684.com/s/Fixture-123",
+            Provider::Pan123,
+            "Fixture-123",
+            "",
+        ),
+        (
             "https://42.share.123pan.cn/123pan/Fixture-123?pwd=AB12",
             Provider::Pan123,
             "Fixture-123",
@@ -133,6 +145,8 @@ fn new_share_routes_and_code_precedence() {
         "https://115cdn.com.evil.test/s/swfixture",
         "https://evil.123pan.cn/s/Fixture-123",
         "https://share.123pan.cn.evil.test/123pan/Fixture-123",
+        "https://www.123295.com.example.org/s/Fixture-123",
+        "https://cdn.123295.com/s/Fixture-123",
         "https://yun.139.com/#/w/i/fixture",
         "https://yun.139.com/shareweb/#/w/i/../secret",
         "https://www.123pan.cn/api/srr?sk=..%2Fsecret",
@@ -255,6 +269,8 @@ fn download_wrappers_and_provider_credential_boundaries() {
 #[test]
 fn pan123_download_nodes_require_the_documented_host_and_port_pairs() {
     for address in [
+        "https://user-other-free-download-cdn.123295.com:443/file",
+        "https://another-node.123295.com/file",
         "https://download-cdn.cjjd19.com/file",
         "https://node.pd1.cjjd19.com/file",
         "https://node.pd1.cjjd19.com:30443/file",
@@ -264,6 +280,16 @@ fn pan123_download_nodes_require_the_documented_host_and_port_pairs() {
         assert!(validate_download(Provider::Quark, address).is_err());
     }
     for (address, reason, node) in [
+        (
+            "https://cdn.123295.com.example.org/private?sig=hidden",
+            "下载域名",
+            "cdn.123295.com.example.org:443",
+        ),
+        (
+            "https://cdn.123295.com:30443/private?sig=hidden",
+            "下载端口",
+            "cdn.123295.com:30443",
+        ),
         (
             "https://node.pd1.cjjd19.com.example.org/private?sig=hidden",
             "下载域名",
@@ -787,7 +813,8 @@ async fn pan123_personal_download_follows_unmarked_redirects_without_api_credent
     let raw = json!({"FileId":123,"FileName":"fixture.txt","Size":32,"Type":0,"Etag":"checksum","S3KeyFlag":"object"});
     let start = "https://download-cdn.cjjd19.com/lookup";
     let edge = "https://node.pd1.cjjd19.com:30443/routes/start";
-    let target = "https://node.pd1.cjjd19.com:30443/files/fixture?params=opaque-signature";
+    let target =
+        "https://user-other-free-download-cdn.123295.com/files/fixture?params=opaque-signature";
     let (session, server) = fixture(
         Provider::Pan123,
         vec![
@@ -796,6 +823,7 @@ async fn pan123_personal_download_follows_unmarked_redirects_without_api_credent
             json!({"code":0,"data":{"DownloadUrl": format!("https://www.123pan.com/download-v2?params={}", STANDARD.encode(start))}}),
             json!({"__fixture_chunked":true,"__fixture_body":json!({"code":0,"data":{"redirect_url":edge}}).to_string()}),
             json!({"__fixture_status":302,"__fixture_headers":{"Location":"../files/fixture?params=opaque-signature"},"__fixture_body":""}),
+            json!({"__fixture_status":307,"__fixture_headers":{"Location":target},"__fixture_body":""}),
             json!({"__fixture_headers":{"Content-Disposition":"attachment; filename=fixture.txt"},"__fixture_body":r#"{"data":{"redirect_url":"should-not-follow"}}"#}),
         ],
     )
@@ -818,6 +846,7 @@ async fn pan123_personal_download_follows_unmarked_redirects_without_api_credent
     assert_eq!(requests[3].target, "/lookup");
     assert_eq!(requests[4].target, "/routes/start");
     assert_eq!(requests[5].target, "/files/fixture?params=opaque-signature");
+    assert_eq!(requests[6].target, "/files/fixture?params=opaque-signature");
     for request in &requests[3..] {
         assert_eq!(request.headers["referer"], "https://yun.123pan.cn/");
         assert_eq!(request.headers["range"], "bytes=0-8191");
@@ -878,7 +907,7 @@ async fn pan123_bounds_redirects_and_retries_a_refused_range() {
 
 #[tokio::test]
 async fn pan123_share_checks_every_cdn_hop_and_preserves_small_json_files() {
-    let share = parse_share("https://www.123pan.com/s/fixture", "").unwrap();
+    let share = parse_share("https://www.123295.com/s/fixture", "").unwrap();
     let body = r#"{"code":0,"data":{"redirect_url":"https://another.example.org/content"}}"#;
     let file = ShareFile {
         id: "42".into(),
@@ -888,7 +917,7 @@ async fn pan123_share_checks_every_cdn_hop_and_preserves_small_json_files() {
         parent_id: "0".into(),
         token: json!({"S3KeyFlag":"object","Etag":crypto::md5_hex(body)}).to_string(),
     };
-    let start = "https://cdn.123pancloud.com/share";
+    let start = "https://user-other-free-download-cdn.123295.com/share";
     let download_info = json!({"code":0,"data":{"DownloadURL":start}});
     let (session, server) = fixture(Provider::Pan123, vec![
         download_info.clone(),

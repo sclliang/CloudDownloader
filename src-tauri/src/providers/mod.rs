@@ -212,13 +212,11 @@ pub fn parse_share(input: &str, code: &str) -> Result<ShareLink, String> {
             "pan.baidu.com" => Provider::Baidu,
             "115.com" | "www.115.com" | "115cdn.com" | "www.115cdn.com" | "115rc.com"
             | "www.115rc.com" | "anxia.com" => Provider::Pan115,
-            "123pan.com" | "www.123pan.com" | "123pan.cn" | "www.123pan.cn" | "123865.com"
-            | "www.123865.com" | "123912.com" | "www.123912.com" => Provider::Pan123,
+            host if pan123_share_host(host) => Provider::Pan123,
             "yun.139.com" => Provider::C139,
             "drive.uc.cn" | "fast.uc.cn" => Provider::Uc,
             "ilanzou.com" | "www.ilanzou.com" => Provider::Ilanzou,
             host if lanzou_host(host) => Provider::Lanzou,
-            host if host_matches(host, "share.123pan.cn") => Provider::Pan123,
             _ => continue,
         };
         let mut embedded_code = String::new();

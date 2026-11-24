@@ -1,3 +1,5 @@
+import pan123ShareDomains from "./pan123-share-domains.txt?raw";
+
 export type Provider =
   | "quark"
   | "baidu"
@@ -29,6 +31,8 @@ export const anonymousShare = (id: Provider) =>
 export const providerName = (id: Provider) =>
   providers.find((p) => p.id === id)?.name || id;
 
+const pan123ShareSites = new Set(pan123ShareDomains.trim().split(/\s+/));
+
 export function shareProvider(text: string): Provider | undefined {
   for (const match of text.matchAll(/https?:\/\/[^\s<>"，。；）)\]]+/g)) {
     try {
@@ -50,16 +54,7 @@ export function shareProvider(text: string): Provider | undefined {
       )
         return "pan115";
       if (
-        [
-          "123pan.com",
-          "www.123pan.com",
-          "123pan.cn",
-          "www.123pan.cn",
-          "123865.com",
-          "www.123865.com",
-          "123912.com",
-          "www.123912.com",
-        ].includes(host) ||
+        pan123ShareSites.has(host.replace(/^www\./, "")) ||
         host === "share.123pan.cn" ||
         host.endsWith(".share.123pan.cn")
       )

@@ -17,17 +17,12 @@ pub(super) fn validate_node(url: Url) -> Result<Url, String> {
     // These CDN edge nodes also serve HTTPS on port 30443.
     let edge = host_matches(host, "pd1.cjjd19.com") || host_matches(host, "d.cjjd15.com");
     let domains = [
-        "123pan.com",
-        "123pan.cn",
         "123pan.net",
         "123pancloud.com",
         "123pancloud.cn",
         "123pancloud.net",
         "123pan-cdn.com",
-        "123865.com",
-        "123912.com",
         "123952.com",
-        "123684.com",
         "p123pan.com",
         "123pancdn.com",
     ];
@@ -37,7 +32,10 @@ pub(super) fn validate_node(url: Url) -> Result<Url, String> {
         "下载地址包含用户信息"
     } else if !edge
         && host != "download-cdn.cjjd19.com"
-        && !domains.iter().any(|d| host_matches(host, d))
+        && !PAN123_SHARE_DOMAINS
+            .lines()
+            .chain(domains)
+            .any(|domain| host_matches(host, domain))
     {
         "尚未识别的下载域名"
     } else if url.port().is_some() && !(edge && url.port() == Some(30443)) {

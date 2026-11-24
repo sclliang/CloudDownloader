@@ -81,14 +81,6 @@ pub fn cloud_route(input: &str) -> bool {
         "115rc.com",
         "www.115rc.com",
         "anxia.com",
-        "123pan.com",
-        "www.123pan.com",
-        "123pan.cn",
-        "www.123pan.cn",
-        "123865.com",
-        "www.123865.com",
-        "123912.com",
-        "www.123912.com",
         "yun.139.com",
         "drive.uc.cn",
         "fast.uc.cn",
@@ -96,7 +88,7 @@ pub fn cloud_route(input: &str) -> bool {
         "www.ilanzou.com",
     ]
     .contains(&host)
-        || host_matches(host, "share.123pan.cn");
+        || pan123_share_host(host);
     lanzou_host(host)
         || (known
             && (path == "/"
@@ -443,6 +435,8 @@ mod tests {
             "https://drive.uc.cn/s/abc",
             "https://www.ilanzou.com/s/abc",
             "https://115.com/s/abc?password=bad",
+            "https://www.123295.com/s/fixture?pwd=Ab12",
+            "https://123684.com/s/fixture",
         ] {
             assert!(cloud_route(link), "{link}");
         }
@@ -450,6 +444,8 @@ mod tests {
             "https://example.com/a.zip",
             "https://pan.baidu.com/file.zip",
             "https://evil.com/s/abc",
+            "https://user-other-free-download-cdn.123295.com/files/example.zip",
+            "https://www.123295.com.example.org/s/fixture",
         ] {
             assert!(!cloud_route(link));
         }

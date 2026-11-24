@@ -104,6 +104,14 @@ pub fn host_matches(host: &str, domain: &str) -> bool {
     host == domain || host.ends_with(&format!(".{domain}"))
 }
 
+pub const PAN123_SHARE_DOMAINS: &str = include_str!("../../src/pan123-share-domains.txt");
+
+pub fn pan123_share_host(host: &str) -> bool {
+    let site = host.strip_prefix("www.").unwrap_or(host);
+    PAN123_SHARE_DOMAINS.lines().any(|domain| site == domain)
+        || host_matches(host, "share.123pan.cn")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareLink {
