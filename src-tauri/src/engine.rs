@@ -208,13 +208,14 @@ impl Rpc {
                         .await;
                     return Ok(());
                 }
-                Err(_) => {
-                    // A missing GID is safe only if the same engine still answers.
-                    self.call("aria2.getVersion", vec![]).await.map_err(|_| {
-                        "无法确认下载引擎已停止该任务，已保留任务和本地文件，请重启程序后重试"
-                            .to_string()
-                    })?;
+                // aria2 can discard a stopped result before it is polled.
+                Err(error) if error == format!("GID {gid} is not found") => {
                     return Ok(());
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "无法确认下载任务已停止，已保留任务和本地文件。{error}"
+                    ))
                 }
                 _ => tokio::time::sleep(Duration::from_millis(100)).await,
             }

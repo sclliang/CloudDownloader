@@ -80,6 +80,10 @@ type Snapshot = {
   uploads: UploadTask[];
   shares: CreatedShare[];
 };
+type BatchResult = {
+  changed: number;
+  failures: { id: string; name: string; message: string }[];
+};
 const state = ref<Snapshot>({
   accounts: providers.map((p) => ({
     provider: p.id,
@@ -137,20 +141,27 @@ const speed = computed(() =>
 );
 // 批量暂停 / 继续：是否存在对应状态的任务
 const hasPausable = computed(() =>
-  state.value.tasks.some((t) => ["active", "waiting", "seeding"].includes(t.status)),
+  state.value.tasks.some((t) =>
+    ["active", "waiting", "seeding"].includes(t.status),
+  ),
 );
 const hasResumable = computed(() =>
-  state.value.tasks.some((t) => ["paused", "error", "cancelled"].includes(t.status)),
+  state.value.tasks.some((t) =>
+    ["paused", "error", "cancelled"].includes(t.status),
+  ),
 );
 const batchBusy = ref(false);
 // 多选：当前选中的任务 id 集合
 const selectedIds = ref<Set<string>>(new Set());
 const selectMode = ref(false);
 const allSelected = computed(
-  () => tasks.value.length > 0 && tasks.value.every((t) => selectedIds.value.has(t.id)),
+  () =>
+    tasks.value.length > 0 &&
+    tasks.value.every((t) => selectedIds.value.has(t.id)),
 );
 const someSelected = computed(
-  () => tasks.value.some((t) => selectedIds.value.has(t.id)) && !allSelected.value,
+  () =>
+    tasks.value.some((t) => selectedIds.value.has(t.id)) && !allSelected.value,
 );
 function toggleSelect(id: string) {
   const next = new Set(selectedIds.value);
@@ -322,42 +333,44 @@ async function action(task: Task, action: string) {
     pendingAction.value = null;
   }
 }
-async function batchAction(kind: "pause" | "resume") {
-  if (batchBusy.value) return;
+async function batchAction(
+  kind: "pause" | "resume" | "remove",
+  selected = false,
+) {
+  const ids = selected ? [...selectedIds.value] : undefined;
+  if (batchBusy.value || (ids && ids.length === 0)) return;
   batchBusy.value = true;
   error.value = "";
   try {
-    const count = await invoke<number>("task_action_all", { action: kind });
-    notice(kind === "pause" ? `已暂停 ${count} 个任务` : `已继续 ${count} 个任务`);
-    await refresh();
-  } catch (e) {
-    error.value = String(e);
-  } finally {
-    batchBusy.value = false;
-  }
-}
-// 对勾选的任务执行暂停/继续/删除
-async function selectedAction(kind: "pause" | "resume" | "remove") {
-  if (batchBusy.value || selectedIds.value.size === 0) return;
-  const ids = [...selectedIds.value];
-  if (kind === "remove") {
-    const dlg = await ask(
-      `确定移除选中的 ${ids.length} 个任务？\n已下载的文件会保留在本地。`,
-      { title: "批量移除任务", kind: "warning" },
-    );
-    if (!dlg) return;
-  }
-  batchBusy.value = true;
-  error.value = "";
-  try {
-    const count = await invoke<number>("task_action_selected", {
-      ids,
-      action: kind,
-      deleteFiles: false,
-    });
-    const label = kind === "pause" ? "暂停" : kind === "resume" ? "继续" : "移除";
-    notice(`已${label} ${count} 个任务`);
-    clearSelection();
+    if (kind === "remove") {
+      if (!ids) return;
+      const confirmed = await ask(
+        `确定移除选中的 ${ids.length} 个任务？\n已下载的文件会保留在本地。`,
+        { title: "批量移除任务", kind: "warning" },
+      );
+      if (!confirmed) return;
+    }
+    const result = ids
+      ? await invoke<BatchResult>("task_action_selected", {
+          ids,
+          action: kind,
+          deleteFiles: false,
+        })
+      : await invoke<BatchResult>("task_action_all", { action: kind });
+    const label =
+      kind === "pause" ? "暂停" : kind === "resume" ? "继续" : "移除";
+    const summary = `已${label} ${result.changed} 个任务`;
+    const firstFailure = result.failures[0];
+    if (firstFailure) {
+      error.value = `${summary}，${result.failures.length} 个失败。${firstFailure.name}：${firstFailure.message}`;
+      if (ids)
+        selectedIds.value = new Set(
+          result.failures.map((failure) => failure.id),
+        );
+    } else {
+      notice(summary);
+      if (ids) clearSelection();
+    }
     await refresh();
   } catch (e) {
     error.value = String(e);
@@ -693,6 +706,7 @@ onUnmounted(() => {
             <button
               class="batch-button"
               :class="{ active: selectMode }"
+              :disabled="batchBusy"
               :title="selectMode ? '退出多选' : '多选任务'"
               :aria-label="selectMode ? '退出多选' : '多选任务'"
               @click="selectMode ? clearSelection() : (selectMode = true)"
@@ -731,9 +745,16 @@ onUnmounted(() => {
           </div>
         </div>
         <div v-if="selectMode" class="selection-bar">
-          <button class="select-all" @click="toggleSelectAll" aria-label="全选">
+          <button
+            class="select-all"
+            :disabled="batchBusy"
+            @click="toggleSelectAll"
+            :aria-label="allSelected ? '取消全选' : '全选'"
+          >
             <component
-              :is="allSelected ? SquareCheck : someSelected ? SquareCheck : Square"
+              :is="
+                allSelected ? SquareCheck : someSelected ? SquareCheck : Square
+              "
               :size="16"
               :class="{ indeterminate: someSelected }"
             />
@@ -744,25 +765,31 @@ onUnmounted(() => {
             <button
               class="batch-button"
               :disabled="!selectedIds.size || batchBusy"
-              @click="selectedAction('pause')"
+              @click="batchAction('pause', true)"
             >
               <Pause :size="15" />暂停
             </button>
             <button
               class="batch-button"
               :disabled="!selectedIds.size || batchBusy"
-              @click="selectedAction('resume')"
+              @click="batchAction('resume', true)"
             >
               <Play :size="15" />继续
             </button>
             <button
               class="batch-button danger"
               :disabled="!selectedIds.size || batchBusy"
-              @click="selectedAction('remove')"
+              @click="batchAction('remove', true)"
             >
               <Trash2 :size="15" />移除
             </button>
-            <button class="batch-button" @click="clearSelection">完成</button>
+            <button
+              class="batch-button"
+              :disabled="batchBusy"
+              @click="clearSelection"
+            >
+              完成
+            </button>
           </div>
         </div>
         <section class="task-list card">
@@ -806,13 +833,10 @@ onUnmounted(() => {
             class="task-row"
             :class="[task.status, { selected: selectedIds.has(task.id) }]"
           >
-            <label
-              v-if="selectMode"
-              class="task-checkbox"
-              @click.stop
-            >
+            <label v-if="selectMode" class="task-checkbox" @click.stop>
               <input
                 type="checkbox"
+                :disabled="batchBusy"
                 :checked="selectedIds.has(task.id)"
                 @change="toggleSelect(task.id)"
                 :aria-label="`选择 ${task.name}`"

@@ -1,5 +1,5 @@
 use crate::model::Task;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
 pub struct Store(Connection);
@@ -23,6 +23,19 @@ impl Store {
                 .and_then(|v| serde_json::from_str(&v).map_err(|e| e.to_string()))
         })
         .collect()
+    }
+    pub fn task(&self, id: &str) -> Result<Option<Task>, String> {
+        let payload: Option<String> = self
+            .0
+            .query_row("SELECT payload FROM tasks WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|e| e.to_string())?;
+        payload
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|e| e.to_string())
     }
     pub fn save(&self, task: &Task) -> Result<(), String> {
         let payload = serde_json::to_string(task).map_err(|e| e.to_string())?;

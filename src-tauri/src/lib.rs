@@ -13,6 +13,7 @@ mod providers;
 mod quark;
 mod session;
 mod store;
+mod task_actions;
 mod task_removal;
 mod tray;
 mod upload;
@@ -399,175 +400,6 @@ async fn enqueue(
 }
 
 #[tauri::command]
-async fn task_action(
-    window: WebviewWindow,
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-    action: String,
-    delete_files: Option<bool>,
-) -> Result<(), String> {
-    trusted(&window)?;
-    let _guard = state.resolving.lock().await;
-    let mut task = state
-        .store
-        .lock()
-        .unwrap()
-        .tasks()?
-        .into_iter()
-        .find(|t| t.id == id)
-        .ok_or("下载任务不存在")?;
-    match action.as_str() {
-        "pause" => {
-            if let Some(gid) = &task.gid {
-                rpc(&state)?
-                    .call("aria2.forcePause", vec![json!(gid)])
-                    .await?;
-            }
-            task.status = "paused".into();
-            task.speed = 0;
-            task.upload_speed = 0;
-            task.connections = 0;
-            state.store.lock().unwrap().save(&task)?;
-        }
-        "resume" => {
-            if !matches!(task.status.as_str(), "paused" | "error" | "cancelled") {
-                return Err("任务当前不能恢复".into());
-            }
-            if let Some(gid) = &task.gid {
-                let rpc = rpc(&state)?;
-                rpc.stop_for_removal(gid).await?;
-            }
-            task.gid = None;
-            start_task(&app, &state, task, None).await?;
-        }
-        "remove" => {
-            if let Some(gid) = &task.gid {
-                rpc(&state)?.stop_for_removal(gid).await?;
-            }
-            task.gid = None;
-            task.speed = 0;
-            task.upload_speed = 0;
-            task.connections = 0;
-            if task.status != "complete" {
-                task.status = "paused".into();
-            }
-            let store = state.store.lock().unwrap();
-            // Keep a stopped, retryable record if filesystem cleanup fails.
-            store.save(&task)?;
-            task_removal::remove_record(&store, &task, delete_files.unwrap_or(false))?;
-        }
-        _ => return Err("未知任务操作".into()),
-    }
-    Ok(())
-}
-
-/// 批量暂停 / 继续所有下载任务。
-/// 直接调用 aria2 的 pauseAll / unpauseAll，让后台 poll_engine 把引擎状态
-/// 自动同步回本地 store（与单任务的 forcePause 行为一致，但一次覆盖全部）。
-/// 不逐个 start_task：那会对成百上千个任务重新解析链接，既慢又容易因个别
-/// 失效链接报错。返回本次受影响的任务数量。
-#[tauri::command]
-async fn task_action_all(
-    window: WebviewWindow,
-    state: State<'_, AppState>,
-    action: String,
-) -> Result<usize, String> {
-    trusted(&window)?;
-    let tasks = state.store.lock().unwrap().tasks()?;
-    let (method, predicate): (&str, fn(&str) -> bool) = match action.as_str() {
-        "pause" => (
-            "aria2.pauseAll",
-            |s| matches!(s, "active" | "waiting" | "seeding"),
-        ),
-        "resume" => (
-            "aria2.unpauseAll",
-            |s| matches!(s, "paused" | "error" | "cancelled"),
-        ),
-        _ => return Err("未知批量操作".into()),
-    };
-    let affected = tasks.iter().filter(|t| predicate(&t.status)).count();
-    if affected == 0 {
-        return Ok(0);
-    }
-    let client = rpc(&state)?;
-    client.call(method, vec![]).await?;
-    Ok(affected)
-}
-
-/// 对指定 id 列表的任务批量执行操作（多选）。
-/// pause: aria2.forcePause + 本地状态置 paused；
-/// resume: aria2.unpause（gid 仍在，不重新解析链接，避免失效分享报错）；
-/// remove: 逐个走与 task_action remove 相同的清理流程。
-#[tauri::command]
-async fn task_action_selected(
-    window: WebviewWindow,
-    state: State<'_, AppState>,
-    ids: Vec<String>,
-    action: String,
-    delete_files: Option<bool>,
-) -> Result<usize, String> {
-    trusted(&window)?;
-    let _guard = state.resolving.lock().await;
-    let all = state.store.lock().unwrap().tasks()?;
-    let selected: Vec<_> = all.into_iter().filter(|t| ids.contains(&t.id)).collect();
-    let client = rpc(&state)?;
-    let mut changed = 0usize;
-    for mut task in selected {
-        match action.as_str() {
-            "pause" => {
-                if !matches!(task.status.as_str(), "active" | "waiting" | "seeding") {
-                    continue;
-                }
-                if let Some(gid) = &task.gid {
-                    if client.call("aria2.forcePause", vec![json!(gid)]).await.is_err() {
-                        continue;
-                    }
-                }
-                task.status = "paused".into();
-                task.speed = 0;
-                task.upload_speed = 0;
-                task.connections = 0;
-                state.store.lock().unwrap().save(&task)?;
-            }
-            "resume" => {
-                if !matches!(task.status.as_str(), "paused" | "error" | "cancelled") {
-                    continue;
-                }
-                if let Some(gid) = &task.gid {
-                    if client.call("aria2.unpause", vec![json!(gid)]).await.is_err() {
-                        continue;
-                    }
-                } else {
-                    // 没有 gid 的任务无法直接恢复，跳过（交给单任务重试流程）
-                    continue;
-                }
-                task.status = "active".into();
-                state.store.lock().unwrap().save(&task)?;
-            }
-            "remove" => {
-                if let Some(gid) = &task.gid {
-                    _ = client.stop_for_removal(gid).await;
-                }
-                task.gid = None;
-                task.speed = 0;
-                task.upload_speed = 0;
-                task.connections = 0;
-                if task.status != "complete" {
-                    task.status = "paused".into();
-                }
-                let store = state.store.lock().unwrap();
-                store.save(&task)?;
-                task_removal::remove_record(&store, &task, delete_files.unwrap_or(false))?;
-            }
-            _ => return Err("未知批量操作".into()),
-        }
-        changed += 1;
-    }
-    Ok(changed)
-}
-
-#[tauri::command]
 fn open_directory(
     window: WebviewWindow,
     state: State<'_, AppState>,
@@ -676,10 +508,10 @@ async fn poll_engine(app: tauri::AppHandle) {
             }
             let store = state.store.lock().unwrap();
             if store
-                .tasks()
-                .unwrap_or_default()
-                .iter()
-                .any(|t| t.id == task.id && t.gid == task.gid && t.status == before_status)
+                .task(&task.id)
+                .ok()
+                .flatten()
+                .is_some_and(|t| t.gid == task.gid && t.status == before_status)
             {
                 let _ = store.save(&task);
             }
@@ -831,9 +663,9 @@ pub fn run() {
             download_commands::poll_bt_inspection,
             download_commands::cancel_bt_inspection,
             download_commands::enqueue_bt,
-            task_action,
-            task_action_all,
-            task_action_selected,
+            task_actions::task_action,
+            task_actions::task_action_all,
+            task_actions::task_action_selected,
             open_directory,
             drive_commands::drive_list,
             cloud_commands::cloud_list,
