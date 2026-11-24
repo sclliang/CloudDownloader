@@ -1,9 +1,13 @@
 [package]
 name = "clouddownloader"
-version = "0.5.7"
+version = "0.5.8"
 description = "Cloud file and transfer manager for Windows"
 authors = ["sclliang"]
 edition = "2021"
+
+[package.metadata]
+company = "sixunited"
+copyright = "Copyright (c) 2026 sixunited. Author: sclliang"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

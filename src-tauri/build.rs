@@ -20,8 +20,9 @@ fn main() {
                 Some(format!("VALUE \"ProductVersion\", \"{version}\""))
             } else if trimmed.starts_with("VALUE \"FileDescription\"") {
                 Some(format!(
-                    "VALUE \"FileDescription\", \"{}\"\nVALUE \"InternalName\", \"CloudDownloader\"\nVALUE \"OriginalFilename\", \"CloudDownloader.exe\"",
-                    env!("CARGO_PKG_DESCRIPTION")
+                    "VALUE \"FileDescription\", \"{}\"\nVALUE \"Author\", \"{}\"\nVALUE \"InternalName\", \"CloudDownloader\"\nVALUE \"OriginalFilename\", \"CloudDownloader.exe\"",
+                    env!("CARGO_PKG_DESCRIPTION"),
+                    env!("CARGO_PKG_AUTHORS")
                 ))
             } else if trimmed.starts_with("VALUE \"Translation\"") {
                 Some("VALUE \"Translation\", 0x0409, 0x04b0".to_string())

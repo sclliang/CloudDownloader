@@ -77,6 +77,7 @@ if ($IncludeInstaller) {
 VIProductVersion "${VERSIONWITHBUILD}"
 VIFileVersion "${VERSIONWITHBUILD}"
 VIAddVersionKey /LANG=1033 "CompanyName" "sixunited"
+VIAddVersionKey /LANG=1033 "Author" "sclliang"
 VIAddVersionKey /LANG=1033 "ProductName" "CloudDownloader"
 VIAddVersionKey /LANG=1033 "FileDescription" "CloudDownloader installer for Windows"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 sixunited. Author: sclliang"

@@ -1,7 +1,10 @@
 {
   "name": "clouddownloader",
   "private": true,
-  "version": "0.5.7",
+  "version": "0.5.8",
+  "author": "sclliang",
+  "company": "sixunited",
+  "copyright": "Copyright (c) 2026 sixunited. Author: sclliang",
   "type": "module",
   "scripts": {
     "dev": "vite",
