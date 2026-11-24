@@ -1,5 +1,14 @@
 use std::sync::OnceLock;
 
+pub fn transient_connection_failure(code: &str, detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    code == "2"
+        || (code == "1"
+            && detail.contains("tls handshake failure")
+            && !detail.contains("certificate")
+            && !detail.contains("证书"))
+}
+
 pub fn message(code: &str, detail: &str, direct: bool) -> String {
     // aria2 details can contain signed URLs. Extract only the numeric HTTP status;
     // never persist or display the raw engine response.
@@ -22,6 +31,14 @@ pub fn message(code: &str, detail: &str, direct: bool) -> String {
             _ => "服务器返回了异常响应，可点击重试",
         };
         return format!("{description}（HTTP {status}）");
+    }
+    if transient_connection_failure(code, detail) {
+        return if code == "2" {
+            "连接下载服务器超时，请稍后重试"
+        } else {
+            "与下载节点的 TLS 握手中断，请重试连接"
+        }
+        .into();
     }
     match code {
         "3" if direct => "文件不存在或链接不可用，请获取有效直链后新建任务".into(),

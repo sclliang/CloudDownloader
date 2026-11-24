@@ -74,6 +74,45 @@ async fn wait_status(rpc: &crate::Rpc, gid: &str, expected: &str) {
     .unwrap();
 }
 
+#[test]
+fn pan123_engine_retry_is_bounded_and_preserves_user_pauses_and_permanent_failures() {
+    let mut task = record(Path::new("."), "test", "error", "https://example.test/");
+    let detail = "SSL/TLS handshake failure: Error: connection closed";
+    assert_eq!(task.connection_retries, 0);
+    assert!(!super::queue_connection_retry(
+        &mut task, "active", "1", detail
+    ));
+    task.direct = None;
+    task.share.provider = crate::Provider::Pan123;
+    assert!(!super::queue_connection_retry(
+        &mut task, "paused", "1", detail
+    ));
+    assert!(!super::queue_connection_retry(
+        &mut task,
+        "active",
+        "1",
+        "SSL/TLS handshake failure: invalid certificate"
+    ));
+    assert!(!super::queue_connection_retry(
+        &mut task,
+        "active",
+        "22",
+        "status=403"
+    ));
+    for attempt in 1..=2 {
+        task.gid = Some("failed".into());
+        assert!(super::queue_connection_retry(
+            &mut task, "active", "1", detail
+        ));
+        assert_eq!(task.connection_retries, attempt);
+        assert_eq!(task.status, "waiting");
+        assert!(task.gid.is_none());
+    }
+    assert!(!super::queue_connection_retry(
+        &mut task, "active", "1", detail
+    ));
+}
+
 #[tokio::test]
 async fn batches_control_only_recorded_tasks_and_report_individual_outcomes() {
     let mut context = tauri::generate_context!();

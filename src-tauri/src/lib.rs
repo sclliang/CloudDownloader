@@ -247,15 +247,7 @@ async fn start_task(
             }
             task.size = size;
         }
-        let gid = rpc(state)?
-            .add(
-                &download.url,
-                &task.directory,
-                &task.name,
-                &download.headers,
-                &download.user_agent,
-            )
-            .await?;
+        let gid = rpc(state)?.add_cloud(&task, &download).await?;
         Ok::<String, String>(gid)
     }
     .await;
@@ -388,6 +380,7 @@ async fn enqueue(
             own: None,
             direct: None,
             connections: 0,
+            connection_retries: 0,
             bt: None,
             upload_speed: 0,
         };
@@ -436,7 +429,7 @@ async fn poll_engine(app: tauri::AppHandle) {
             ) {
                 continue;
             }
-            let Some(gid) = &task.gid else {
+            let Some(gid) = task.gid.clone() else {
                 continue;
             };
             let before_status = task.status.clone();
@@ -498,22 +491,24 @@ async fn poll_engine(app: tauri::AppHandle) {
                     task.speed = 0;
                 }
             }
+            let mut retry = false;
             if task.status == "error" {
                 let code = value["errorCode"].as_str().unwrap_or("未知");
-                task.error = download_errors::message(
-                    code,
-                    value["errorMessage"].as_str().unwrap_or_default(),
-                    task.direct.is_some(),
-                );
+                let detail = value["errorMessage"].as_str().unwrap_or_default();
+                task.error = download_errors::message(code, detail, task.direct.is_some());
+                retry =
+                    task_actions::queue_connection_retry(&mut task, &before_status, code, detail);
             }
             let store = state.store.lock().unwrap();
-            if store
-                .task(&task.id)
-                .ok()
-                .flatten()
-                .is_some_and(|t| t.gid == task.gid && t.status == before_status)
-            {
-                let _ = store.save(&task);
+            let current = store.task(&task.id).ok().flatten().is_some_and(|t| {
+                t.gid.as_deref() == Some(gid.as_str()) && t.status == before_status
+            });
+            if !current || store.save(&task).is_err() {
+                continue;
+            }
+            drop(store);
+            if retry {
+                task_actions::retry_connection(app.clone(), task.id, gid, task.connection_retries);
             }
         }
         let _ = app.emit_to("main", "tasks-changed", ());

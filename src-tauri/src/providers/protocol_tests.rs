@@ -726,6 +726,9 @@ async fn fixture(
                 }
             };
             requests.push(request);
+            if response["__fixture_disconnect"] == true {
+                continue;
+            }
             let body = response["__fixture_body"]
                 .as_str()
                 .map(String::from)
@@ -864,6 +867,65 @@ async fn pan123_personal_download_follows_unmarked_redirects_without_api_credent
     let payload: Value = serde_json::from_str(&requests[2].body).unwrap();
     assert_eq!(payload["fileId"], 123);
     assert_eq!(payload["s3keyFlag"], "object");
+}
+
+#[tokio::test]
+async fn pan123_retries_interrupted_cdn_connections_but_stops_on_permission_errors() {
+    let file = ShareFile {
+        id: "43".into(),
+        name: "fixture.bin".into(),
+        size: 4,
+        is_dir: false,
+        parent_id: "0".into(),
+        token: json!({"S3KeyFlag":"object", "Etag":"checksum"}).to_string(),
+    };
+    let node = "https://user-other-free-download-cdn.123295.com/fixture";
+    let info = json!({"code":0, "data":{"DownloadURL":node}});
+    let dropped = json!({"__fixture_disconnect":true});
+    for (replies, expected, cdn_requests) in [
+        (
+            vec![dropped.clone(), json!({"__fixture_body":"data"})],
+            Ok(node),
+            2,
+        ),
+        (
+            vec![dropped.clone(), dropped.clone(), dropped],
+            Err("连接失败"),
+            3,
+        ),
+        (
+            vec![json!({"__fixture_status":403,"__fixture_body":""})],
+            Err("HTTP 403"),
+            1,
+        ),
+    ] {
+        let (session, server) = fixture(
+            Provider::Pan123,
+            [
+                vec![json!({"__fixture_disconnect":true}), info.clone()],
+                replies,
+            ]
+            .concat(),
+        )
+        .await;
+        let result = session.pan123_download(&file, None).await;
+        match expected {
+            Ok(url) => assert_eq!(result.unwrap(), url),
+            Err(reason) => assert!(result.unwrap_err().contains(reason)),
+        }
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2 + cdn_requests);
+        assert_eq!(requests[0].target, requests[1].target);
+        assert_eq!(requests[0].body, requests[1].body);
+        for request in &requests[2..] {
+            assert_eq!(request.target, "/fixture");
+            assert_eq!(request.headers["range"], "bytes=0-8191");
+            assert!(
+                !request.headers.contains_key("authorization")
+                    && !request.headers.contains_key("cookie")
+            );
+        }
+    }
 }
 
 #[tokio::test]

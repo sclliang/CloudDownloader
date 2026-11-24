@@ -241,6 +241,29 @@ impl Rpc {
         }
         Ok(data["result"].clone())
     }
+    pub async fn add_cloud(
+        &self,
+        task: &crate::Task,
+        download: &crate::providers::Download,
+    ) -> Result<String, String> {
+        let options =
+            if task.connection_retries > 0 && task.share.provider == crate::Provider::Pan123 {
+                json!({"split":"1", "max-connection-per-server":"1"})
+            } else {
+                json!({})
+            };
+        self.add_with_options(
+            &download.url,
+            &task.directory,
+            &task.name,
+            &download.headers,
+            &download.user_agent,
+            options,
+        )
+        .await
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub async fn add(
         &self,
         url: &str,

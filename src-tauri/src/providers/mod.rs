@@ -133,7 +133,14 @@ impl Session {
         })
     }
     pub async fn json(&self, request: reqwest::RequestBuilder) -> Result<Value, String> {
-        let response = request.send().await.map_err(|e| {
+        self.json_response(request.send().await).await
+    }
+
+    async fn json_response(
+        &self,
+        response: Result<reqwest::Response, reqwest::Error>,
+    ) -> Result<Value, String> {
+        let response = response.map_err(|e| {
             format!(
                 "连接{}{}",
                 self.provider.name(),

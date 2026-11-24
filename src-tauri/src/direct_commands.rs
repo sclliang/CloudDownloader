@@ -73,6 +73,7 @@ pub async fn enqueue_direct(
             last_modified: metadata.last_modified.clone(),
         }),
         connections: 0,
+        connection_retries: 0,
         bt: None,
         upload_speed: 0,
     };

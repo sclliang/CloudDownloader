@@ -55,6 +55,10 @@ fn node_name(url: &Url) -> String {
 }
 
 impl Session {
+    async fn pan123_json(&self, request: reqwest::RequestBuilder) -> Result<Value, String> {
+        self.json_response(send_read_request(request).await).await
+    }
+
     async fn pan123_request(
         &self,
         path: &str,
@@ -87,7 +91,7 @@ impl Session {
                 .get(self.endpoint(&format!("{host}{path}")))
         };
         let response = self
-            .json(
+            .pan123_json(
                 request
                     .query(&query)
                     .header("authorization", format!("Bearer {token}"))
@@ -187,7 +191,7 @@ impl Session {
             if !share.passcode.is_empty() {
                 request = request.query(&[("SharePwd", &share.passcode)]);
             }
-            let value = check(self.provider, self.json(request).await?)?;
+            let value = check(self.provider, self.pan123_json(request).await?)?;
             if value["data"]["Expired"].as_bool() == Some(true) {
                 return Err("123 分享已失效".into());
             }
@@ -255,26 +259,18 @@ impl Session {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .user_agent(crate::quark::USER_AGENT)
-            .timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(std::time::Duration::from_secs(12))
+            .timeout(std::time::Duration::from_secs(25))
             .build()
             .map_err(|_| "无法初始化 123 下载连接")?;
         let mut url = decode_download(address, None)?;
         let range = format!("bytes=0-{}", MAX_REDIRECT_BODY - 1);
         for _ in 0..=MAX_REDIRECTS {
             url = validate_node(url)?;
-            let request = || {
-                client
-                    .get(self.endpoint(url.as_str()))
-                    .header(REFERER, "https://yun.123pan.cn/")
-                    .header(ACCEPT_ENCODING, "identity")
-            };
-            let response = match request().header(RANGE, range.as_str()).send().await {
-                Ok(response) if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE => {
-                    request().send().await
-                }
-                result => result,
+            let mut response = self.get_pan123_node(&client, &url, Some(&range)).await?;
+            if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+                response = self.get_pan123_node(&client, &url, None).await?;
             }
-            .map_err(|_| format!("123 云盘下载节点连接失败（{}）", node_name(&url)))?;
             let status = response.status();
             let next = if status.is_redirection() {
                 response
@@ -299,6 +295,71 @@ impl Session {
         }
         Err("123 下载跳转次数过多，请稍后重试".into())
     }
+
+    async fn get_pan123_node(
+        &self,
+        client: &reqwest::Client,
+        url: &Url,
+        range: Option<&str>,
+    ) -> Result<reqwest::Response, String> {
+        let mut request = client
+            .get(self.endpoint(url.as_str()))
+            .header(REFERER, "https://yun.123pan.cn/")
+            .header(ACCEPT_ENCODING, "identity");
+        if let Some(range) = range {
+            request = request.header(RANGE, range);
+        }
+        send_read_request(request).await.map_err(|error| {
+            let reason = if certificate_error(&error) {
+                " TLS 证书验证失败"
+            } else if error.is_timeout() {
+                "连接超时"
+            } else {
+                "连接失败"
+            };
+            format!("123 云盘下载节点{reason}（{}）", node_name(url))
+        })
+    }
+}
+
+fn certificate_error(error: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if cause
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("certificate")
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
+// The two POST endpoints used here only return download metadata. HTTP responses,
+// including permission and quota errors, are handled by the caller without retry.
+async fn send_read_request(
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    for attempt in 0..2 {
+        let Some(replay) = request.try_clone() else {
+            break;
+        };
+        match replay.send().await {
+            Ok(response) => return Ok(response),
+            Err(error)
+                if certificate_error(&error)
+                    || !(error.is_request() || error.is_connect() || error.is_timeout()) =>
+            {
+                return Err(error)
+            }
+            Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_millis(300 * (attempt + 1))).await
+            }
+        }
+    }
+    request.send().await
 }
 
 async fn json_redirect(

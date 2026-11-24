@@ -408,6 +408,7 @@ pub async fn enqueue_bt(
         own: None,
         direct: None,
         connections: 0,
+        connection_retries: 0,
         upload_speed: 0,
         bt: Some(BtSource {
             info_hash,

@@ -170,6 +170,7 @@ mod tests {
                 own: None,
                 direct: None,
                 connections: 0,
+                connection_retries: 0,
                 bt: None,
                 upload_speed: 0,
             };

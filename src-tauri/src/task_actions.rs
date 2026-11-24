@@ -2,7 +2,7 @@ use crate::{model::Task, rpc, start_task, task_removal, trusted, AppState};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
-use tauri::{AppHandle, State, WebviewWindow};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 #[cfg(all(test, windows))]
 #[path = "task_actions_tests.rs"]
@@ -73,6 +73,7 @@ async fn apply_action(
         }
         Action::Resume => {
             stop_download(state, &mut task).await?;
+            task.connection_retries = 0;
             let restarted = start_task(app, state, task, None).await?;
             if restarted.status == "error" {
                 return Err(restarted.error);
@@ -94,6 +95,47 @@ async fn apply_action(
         task_removal::remove_record(&store, &task, delete_files)?;
     }
     Ok(true)
+}
+
+pub(super) fn queue_connection_retry(
+    task: &mut Task,
+    previous_status: &str,
+    code: &str,
+    detail: &str,
+) -> bool {
+    if task.share.provider != crate::Provider::Pan123
+        || task.direct.is_some()
+        || task.bt.is_some()
+        || !matches!(previous_status, "active" | "waiting")
+        || task.connection_retries >= 2
+        || !crate::download_errors::transient_connection_failure(code, detail)
+    {
+        return false;
+    }
+    task.connection_retries += 1;
+    task.gid = None;
+    task.status = "waiting".into();
+    task.error.clear();
+    true
+}
+
+pub(super) fn retry_connection(app: AppHandle, id: String, failed_gid: String, attempt: u8) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        if let Ok(engine) = rpc(&state) {
+            let _ = engine
+                .call("aria2.removeDownloadResult", vec![json!(failed_gid)])
+                .await;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(u64::from(attempt))).await;
+        let _guard = state.resolving.lock().await;
+        let task = state.store.lock().unwrap().task(&id).ok().flatten();
+        if let Some(task) = task
+            .filter(|t| t.status == "waiting" && t.gid.is_none() && t.connection_retries == attempt)
+        {
+            let _ = start_task(&app, &state, task, None).await;
+        }
+    });
 }
 
 async fn apply_batch(

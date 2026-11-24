@@ -187,6 +187,8 @@ pub struct Task {
     #[serde(default)]
     pub connections: u32,
     #[serde(default)]
+    pub connection_retries: u8,
+    #[serde(default)]
     pub bt: Option<BtSource>,
     #[serde(default)]
     pub upload_speed: u64,
