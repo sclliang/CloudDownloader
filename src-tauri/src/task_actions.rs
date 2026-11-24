@@ -4,6 +4,10 @@ use serde_json::json;
 use std::collections::HashSet;
 use tauri::{AppHandle, State, WebviewWindow};
 
+#[cfg(all(test, windows))]
+#[path = "task_actions_tests.rs"]
+mod tests;
+
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {

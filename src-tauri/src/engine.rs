@@ -28,7 +28,7 @@ impl Engine {
     pub fn start() -> Result<Self, String> {
         Self::with_args(&[])
     }
-    fn with_args(extra: &[&str]) -> Result<Self, String> {
+    pub(super) fn with_args(extra: &[&str]) -> Result<Self, String> {
         let executable = find_binary()?;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
