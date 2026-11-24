@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import DrivePanel from "./DrivePanel.vue";
 import CloudDrivePanel from "./CloudDrivePanel.vue";
 import { type Provider, providers, providerName } from "./providers";
@@ -15,6 +15,8 @@ import type { UploadTask, CreatedShare } from "./cloud";
 import {
   ArrowDownToLine,
   ArrowDown,
+  SquareCheck,
+  Square,
   ArrowUpRight,
   ArrowUpFromLine,
   Share2,
@@ -133,6 +135,42 @@ const failed = computed(() =>
 const speed = computed(() =>
   state.value.tasks.reduce((sum, t) => sum + t.speed, 0),
 );
+// 批量暂停 / 继续：是否存在对应状态的任务
+const hasPausable = computed(() =>
+  state.value.tasks.some((t) => ["active", "waiting", "seeding"].includes(t.status)),
+);
+const hasResumable = computed(() =>
+  state.value.tasks.some((t) => ["paused", "error", "cancelled"].includes(t.status)),
+);
+const batchBusy = ref(false);
+// 多选：当前选中的任务 id 集合
+const selectedIds = ref<Set<string>>(new Set());
+const selectMode = ref(false);
+const allSelected = computed(
+  () => tasks.value.length > 0 && tasks.value.every((t) => selectedIds.value.has(t.id)),
+);
+const someSelected = computed(
+  () => tasks.value.some((t) => selectedIds.value.has(t.id)) && !allSelected.value,
+);
+function toggleSelect(id: string) {
+  const next = new Set(selectedIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  selectedIds.value = next;
+}
+function toggleSelectAll() {
+  const next = new Set(selectedIds.value);
+  if (allSelected.value) {
+    tasks.value.forEach((t) => next.delete(t.id));
+  } else {
+    tasks.value.forEach((t) => next.add(t.id));
+  }
+  selectedIds.value = next;
+}
+function clearSelection() {
+  selectedIds.value = new Set();
+  selectMode.value = false;
+}
 const uploadSpeed = computed(
   () =>
     state.value.tasks.reduce((sum, t) => sum + (t.uploadSpeed || 0), 0) +
@@ -282,6 +320,49 @@ async function action(task: Task, action: string) {
     error.value = String(e);
   } finally {
     pendingAction.value = null;
+  }
+}
+async function batchAction(kind: "pause" | "resume") {
+  if (batchBusy.value) return;
+  batchBusy.value = true;
+  error.value = "";
+  try {
+    const count = await invoke<number>("task_action_all", { action: kind });
+    notice(kind === "pause" ? `已暂停 ${count} 个任务` : `已继续 ${count} 个任务`);
+    await refresh();
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    batchBusy.value = false;
+  }
+}
+// 对勾选的任务执行暂停/继续/删除
+async function selectedAction(kind: "pause" | "resume" | "remove") {
+  if (batchBusy.value || selectedIds.value.size === 0) return;
+  const ids = [...selectedIds.value];
+  if (kind === "remove") {
+    const dlg = await ask(
+      `确定移除选中的 ${ids.length} 个任务？\n已下载的文件会保留在本地。`,
+      { title: "批量移除任务", kind: "warning" },
+    );
+    if (!dlg) return;
+  }
+  batchBusy.value = true;
+  error.value = "";
+  try {
+    const count = await invoke<number>("task_action_selected", {
+      ids,
+      action: kind,
+      deleteFiles: false,
+    });
+    const label = kind === "pause" ? "暂停" : kind === "resume" ? "继续" : "移除";
+    notice(`已${label} ${count} 个任务`);
+    clearSelection();
+    await refresh();
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    batchBusy.value = false;
   }
 }
 function confirmRemove(task: Task) {
@@ -608,12 +689,80 @@ onUnmounted(() => {
           <div class="speed-label" v-if="speed">
             <ArrowDown :size="14" />{{ bytes(speed) }}/s
           </div>
+          <div class="batch-actions">
+            <button
+              class="batch-button"
+              :class="{ active: selectMode }"
+              :title="selectMode ? '退出多选' : '多选任务'"
+              :aria-label="selectMode ? '退出多选' : '多选任务'"
+              @click="selectMode ? clearSelection() : (selectMode = true)"
+            >
+              <SquareCheck :size="15" />{{ selectMode ? "取消多选" : "多选" }}
+            </button>
+            <template v-if="!selectMode">
+              <button
+                v-if="hasPausable"
+                class="batch-button"
+                title="全部暂停"
+                aria-label="全部暂停"
+                :disabled="batchBusy"
+                @click="batchAction('pause')"
+              >
+                <Pause :size="15" />全部暂停
+              </button>
+              <button
+                v-if="hasResumable"
+                class="batch-button"
+                title="全部继续"
+                aria-label="全部继续"
+                :disabled="batchBusy"
+                @click="batchAction('resume')"
+              >
+                <Play :size="15" />全部继续
+              </button>
+            </template>
+          </div>
           <div class="task-search">
             <Search :size="15" /><input
               v-model="filter"
               placeholder="搜索任务"
               aria-label="搜索下载任务"
             />
+          </div>
+        </div>
+        <div v-if="selectMode" class="selection-bar">
+          <button class="select-all" @click="toggleSelectAll" aria-label="全选">
+            <component
+              :is="allSelected ? SquareCheck : someSelected ? SquareCheck : Square"
+              :size="16"
+              :class="{ indeterminate: someSelected }"
+            />
+            {{ allSelected ? "取消全选" : "全选" }}
+          </button>
+          <span class="selection-count">已选 {{ selectedIds.size }} 项</span>
+          <div class="selection-actions">
+            <button
+              class="batch-button"
+              :disabled="!selectedIds.size || batchBusy"
+              @click="selectedAction('pause')"
+            >
+              <Pause :size="15" />暂停
+            </button>
+            <button
+              class="batch-button"
+              :disabled="!selectedIds.size || batchBusy"
+              @click="selectedAction('resume')"
+            >
+              <Play :size="15" />继续
+            </button>
+            <button
+              class="batch-button danger"
+              :disabled="!selectedIds.size || batchBusy"
+              @click="selectedAction('remove')"
+            >
+              <Trash2 :size="15" />移除
+            </button>
+            <button class="batch-button" @click="clearSelection">完成</button>
           </div>
         </div>
         <section class="task-list card">
@@ -655,8 +804,24 @@ onUnmounted(() => {
             v-for="task in tasks"
             :key="task.id"
             class="task-row"
-            :class="task.status"
+            :class="[task.status, { selected: selectedIds.has(task.id) }]"
           >
+            <label
+              v-if="selectMode"
+              class="task-checkbox"
+              @click.stop
+            >
+              <input
+                type="checkbox"
+                :checked="selectedIds.has(task.id)"
+                @change="toggleSelect(task.id)"
+                :aria-label="`选择 ${task.name}`"
+              />
+              <component
+                :is="selectedIds.has(task.id) ? SquareCheck : Square"
+                :size="18"
+              />
+            </label>
             <div class="task-file-icon" :class="fileKind(task.name)">
               <component :is="fileIcon(task.name)" :size="25" />
             </div>
