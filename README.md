@@ -27,12 +27,12 @@
 
 ## 下载
 
-最新版本 **0.5.7**：全新蓝白界面与深灰 Night 主题，统一管理直链、网盘和 BT 下载。
+最新版本 **0.5.8** 修复了 123 云盘个人文件和外部分享的下载中断问题，并支持多选任务后批量暂停、继续或移除。
 
 | Windows 安装版 · 推荐                 | 便携版                                 |
 | :------------------------------------ | :------------------------------------- |
 | 自动创建快捷方式，适合日常使用。      | 解压即可运行，保留完整目录结构。       |
-| **[↓ 下载 v0.5.7 安装包][installer]** | **[↓ 下载 v0.5.7 便携 ZIP][portable]** |
+| **[↓ 下载 v0.5.8 安装包][installer]** | **[↓ 下载 v0.5.8 便携 ZIP][portable]** |
 
 [全部版本与更新说明][releases] · [SHA-256 校验文件][checksums]
 
@@ -135,7 +135,7 @@ npm run tauri dev -- --no-watch
 
 ## 文档与致谢
 
-[使用指南](docs/usage.md) · [开发文档](docs/development.md) · [验证记录](VERIFICATION.md) · [更新说明](docs/release-0.5.7.md) · [第三方许可](third-party/notices/)
+[使用指南](docs/usage.md) · [开发文档](docs/development.md) · [验证记录](VERIFICATION.md) · [更新说明](docs/release-0.5.8.md) · [第三方许可](third-party/notices/)
 
 界面布局与蓝白配色参考 [Motrix](https://github.com/agalwood/Motrix)，保留本项目的统一下载入口与多网盘工作区。
 
@@ -143,7 +143,7 @@ npm run tauri dev -- --no-watch
 
 <p align="center"><sub>sixunited · 作者 <a href="https://github.com/sclliang">sclliang</a></sub></p>
 
-[installer]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.7/CloudDownloader_0.5.7_x64-setup.exe
-[portable]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.7/CloudDownloader-0.5.7-win-x64.zip
-[checksums]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.7/SHA256SUMS-0.5.7.txt
+[installer]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.8/CloudDownloader_0.5.8_x64-setup.exe
+[portable]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.8/CloudDownloader-0.5.8-win-x64.zip
+[checksums]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.8/SHA256SUMS-0.5.8.txt
 [releases]: https://github.com/sclliang/CloudDownloader/releases
