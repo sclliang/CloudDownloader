@@ -207,8 +207,15 @@ fn download_wrappers_and_provider_credential_boundaries() {
         target.to_string(),
         encoded.clone(),
         format!("https://www.123pan.com/download-v2?params={encoded}"),
+        format!("https://www.123pan.com/download?params={encoded}"),
+        STANDARD.encode(format!(
+            "https://www.123pan.com/download-v2?params={encoded}"
+        )),
     ] {
-        assert_eq!(pan123::decode_download(&value).unwrap(), target);
+        assert_eq!(
+            pan123::decode_download(&value, None).unwrap().as_str(),
+            target
+        );
     }
     for (provider, address) in [
         (Provider::Pan115, "https://cdn.115cdn.com/file"),
@@ -241,6 +248,47 @@ fn download_wrappers_and_provider_credential_boundaries() {
             "http://cdn.123pancloud.com/file",
         ] {
             assert!(session.download_descriptor(bad.into()).is_err());
+        }
+    }
+}
+
+#[test]
+fn pan123_download_nodes_require_the_documented_host_and_port_pairs() {
+    for address in [
+        "https://download-cdn.cjjd19.com/file",
+        "https://node.pd1.cjjd19.com/file",
+        "https://node.pd1.cjjd19.com:30443/file",
+        "https://node.d.cjjd15.com:30443/file",
+    ] {
+        assert!(validate_download(Provider::Pan123, address).is_ok());
+        assert!(validate_download(Provider::Quark, address).is_err());
+    }
+    for (address, reason, node) in [
+        (
+            "https://node.pd1.cjjd19.com.example.org/private?sig=hidden",
+            "下载域名",
+            "node.pd1.cjjd19.com.example.org:443",
+        ),
+        (
+            "https://yun.123pan.cn:30443/private?sig=hidden",
+            "下载端口",
+            "yun.123pan.cn:30443",
+        ),
+        (
+            "https://node.d.cjjd15.com:9443/private?sig=hidden",
+            "下载端口",
+            "node.d.cjjd15.com:9443",
+        ),
+        (
+            "https://user:password@node.pd1.cjjd19.com/private?sig=hidden",
+            "用户信息",
+            "node.pd1.cjjd19.com:443",
+        ),
+    ] {
+        let error = validate_download(Provider::Pan123, address).unwrap_err();
+        assert!(error.contains(reason) && error.contains(node));
+        for redacted in ["private", "sig", "hidden", "user", "password"] {
+            assert!(!error.contains(redacted));
         }
     }
 }
@@ -666,7 +714,17 @@ async fn fixture(
                     extra.push_str(&format!("{key}: {}\r\n", value.as_str().unwrap()));
                 }
             }
-            let wire = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n{body}", body.len());
+            let headers = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\n{extra}Connection: close\r\n");
+            let wire = if response["__fixture_chunked"] == true {
+                let mut wire = format!("{headers}Transfer-Encoding: chunked\r\n\r\n");
+                if !body.is_empty() {
+                    wire.push_str(&format!("{:x}\r\n{body}\r\n", body.len()));
+                }
+                wire.push_str("0\r\n\r\n");
+                wire
+            } else {
+                format!("{headers}Content-Length: {}\r\n\r\n{body}", body.len())
+            };
             stream.write_all(wire.as_bytes()).await.unwrap();
         }
         requests
@@ -725,14 +783,20 @@ async fn quark_personal_download_refreshes_metadata_before_issuing_url() {
 }
 
 #[tokio::test]
-async fn pan123_personal_download_uses_bearer_signature_and_stable_device_id() {
+async fn pan123_personal_download_follows_unmarked_redirects_without_api_credentials() {
     let raw = json!({"FileId":123,"FileName":"fixture.txt","Size":32,"Type":0,"Etag":"checksum","S3KeyFlag":"object"});
+    let start = "https://download-cdn.cjjd19.com/lookup";
+    let edge = "https://node.pd1.cjjd19.com:30443/routes/start";
+    let target = "https://node.pd1.cjjd19.com:30443/files/fixture?params=opaque-signature";
     let (session, server) = fixture(
         Provider::Pan123,
         vec![
             json!({"code":0,"data":{"UID":1234,"Nickname":"fixture"}}),
             json!({"code":0,"data":{"InfoList":[raw.clone()],"Next":"-1"}}),
-            json!({"code":0,"data":{"DownloadUrl":"https://cdn.123pancloud.com/fixture"}}),
+            json!({"code":0,"data":{"DownloadUrl": format!("https://www.123pan.com/download-v2?params={}", STANDARD.encode(start))}}),
+            json!({"__fixture_chunked":true,"__fixture_body":json!({"code":0,"data":{"redirect_url":edge}}).to_string()}),
+            json!({"__fixture_status":302,"__fixture_headers":{"Location":"../files/fixture?params=opaque-signature"},"__fixture_body":""}),
+            json!({"__fixture_headers":{"Content-Disposition":"attachment; filename=fixture.txt"},"__fixture_body":r#"{"data":{"redirect_url":"should-not-follow"}}"#}),
         ],
     )
     .await;
@@ -741,18 +805,112 @@ async fn pan123_personal_download_uses_bearer_signature_and_stable_device_id() {
         file: cloud::entry(Provider::Pan123, &raw, "/").unwrap().file,
     };
     let download = session.cloud_download(&source).await.unwrap();
+    assert_eq!(download.url, target);
     assert_eq!(download.headers.len(), 1);
     let requests = server.await.unwrap();
-    for request in &requests {
+    for request in &requests[..3] {
         assert_eq!(request.headers["authorization"], "Bearer fixture-bearer");
         assert_eq!(request.headers["loginuuid"], session.device_id);
         assert!(
             request.headers.contains_key("auth-key") && request.headers.contains_key("auth-value")
         );
     }
+    assert_eq!(requests[3].target, "/lookup");
+    assert_eq!(requests[4].target, "/routes/start");
+    assert_eq!(requests[5].target, "/files/fixture?params=opaque-signature");
+    for request in &requests[3..] {
+        assert_eq!(request.headers["referer"], "https://yun.123pan.cn/");
+        assert_eq!(request.headers["range"], "bytes=0-8191");
+        assert_eq!(request.headers["user-agent"], download.user_agent);
+        for header in [
+            "cookie",
+            "authorization",
+            "loginuuid",
+            "auth-key",
+            "auth-value",
+        ] {
+            assert!(!request.headers.contains_key(header));
+        }
+    }
     let payload: Value = serde_json::from_str(&requests[2].body).unwrap();
     assert_eq!(payload["fileId"], 123);
     assert_eq!(payload["s3keyFlag"], "object");
+}
+
+#[tokio::test]
+async fn pan123_bounds_redirects_and_retries_a_refused_range() {
+    let file = ShareFile {
+        id: "41".into(),
+        name: "fixture".into(),
+        size: 12000,
+        is_dir: false,
+        parent_id: "0".into(),
+        token: json!({"S3KeyFlag":"object","Etag":"checksum"}).to_string(),
+    };
+    let start = "https://cdn.123pancloud.com/start";
+    for hops in [5, 6] {
+        let mut replies = vec![json!({"code":0,"data":{"DownloadUrl":start}})];
+        for n in 1..=hops {
+            replies.push(json!({"__fixture_status":307,"__fixture_headers":{"Location":format!("/step/{n}")},"__fixture_body":""}));
+        }
+        if hops == 5 {
+            replies.push(json!({"__fixture_status":416,"__fixture_body":""}));
+            // Even a redirect-shaped prefix is file content once the unframed body exceeds 8 KiB.
+            let body = format!(
+                r#"{{"data":{{"redirect_url":"/wrong"}}}}{}"#,
+                " ".repeat(12000)
+            );
+            replies.push(json!({"__fixture_chunked":true,"__fixture_body":body}));
+        }
+        let (session, server) = fixture(Provider::Pan123, replies).await;
+        let result = session.pan123_download(&file, None).await;
+        let requests = server.await.unwrap();
+        if hops == 5 {
+            assert_eq!(result.unwrap(), "https://cdn.123pancloud.com/step/5");
+            assert_eq!(requests.last().unwrap().target, "/step/5");
+            assert!(!requests.last().unwrap().headers.contains_key("range"));
+        } else {
+            assert!(result.unwrap_err().contains("跳转次数过多"));
+            assert_eq!(requests.len(), 7);
+        }
+    }
+}
+
+#[tokio::test]
+async fn pan123_share_checks_every_cdn_hop_and_preserves_small_json_files() {
+    let share = parse_share("https://www.123pan.com/s/fixture", "").unwrap();
+    let body = r#"{"code":0,"data":{"redirect_url":"https://another.example.org/content"}}"#;
+    let file = ShareFile {
+        id: "42".into(),
+        name: "fixture.json".into(),
+        size: body.len() as u64,
+        is_dir: false,
+        parent_id: "0".into(),
+        token: json!({"S3KeyFlag":"object","Etag":crypto::md5_hex(body)}).to_string(),
+    };
+    let start = "https://cdn.123pancloud.com/share";
+    let download_info = json!({"code":0,"data":{"DownloadURL":start}});
+    let (session, server) = fixture(Provider::Pan123, vec![
+        download_info.clone(),
+        json!({"code":0,"data":{"redirect_url":"https://unknown.example.org:9443/path?sig=private"}}),
+    ]).await;
+    let error = session.download(&share, &file, "").await.err().unwrap();
+    assert!(error.contains("unknown.example.org:9443") && !error.contains("private"));
+    assert_eq!(server.await.unwrap().len(), 2);
+
+    let (session, server) = fixture(
+        Provider::Pan123,
+        vec![
+            download_info,
+            json!({"__fixture_chunked":true,"__fixture_body":body}),
+        ],
+    )
+    .await;
+    assert_eq!(
+        session.download(&share, &file, "").await.unwrap().url,
+        start
+    );
+    assert_eq!(server.await.unwrap().len(), 2);
 }
 
 #[tokio::test]

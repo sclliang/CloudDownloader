@@ -3,7 +3,58 @@ use super::{
     crypto, number, text, Session,
 };
 use crate::model::*;
+use reqwest::header::{
+    ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_RANGE, LOCATION, RANGE, REFERER,
+};
 use serde_json::{json, Value};
+use url::Url;
+
+const MAX_REDIRECTS: usize = 5;
+const MAX_REDIRECT_BODY: usize = 8192;
+
+pub(super) fn validate_node(url: Url) -> Result<Url, String> {
+    let host = url.host_str().unwrap_or_default();
+    // These CDN edge nodes also serve HTTPS on port 30443.
+    let edge = host_matches(host, "pd1.cjjd19.com") || host_matches(host, "d.cjjd15.com");
+    let domains = [
+        "123pan.com",
+        "123pan.cn",
+        "123pan.net",
+        "123pancloud.com",
+        "123pancloud.cn",
+        "123pancloud.net",
+        "123pan-cdn.com",
+        "123865.com",
+        "123912.com",
+        "123952.com",
+        "123684.com",
+        "p123pan.com",
+        "123pancdn.com",
+    ];
+    let reason = if url.scheme() != "https" {
+        "下载节点需要 HTTPS"
+    } else if !url.username().is_empty() || url.password().is_some() {
+        "下载地址包含用户信息"
+    } else if !edge
+        && host != "download-cdn.cjjd19.com"
+        && !domains.iter().any(|d| host_matches(host, d))
+    {
+        "尚未识别的下载域名"
+    } else if url.port().is_some() && !(edge && url.port() == Some(30443)) {
+        "不支持的下载端口"
+    } else {
+        return Ok(url);
+    };
+    Err(format!("123 云盘{reason}（{}）", node_name(&url)))
+}
+
+fn node_name(url: &Url) -> String {
+    let host = url.host_str().unwrap_or("无主机名");
+    match url.port_or_known_default() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    }
+}
 
 impl Session {
     async fn pan123_request(
@@ -179,15 +230,16 @@ impl Session {
     ) -> Result<String, String> {
         let metadata: Value =
             serde_json::from_str(&file.token).map_err(|_| "123 文件信息已过期，请重新解析")?;
+        let etag = text(&metadata["Etag"]);
         let (path, body) = if let Some(share) = share {
             (
                 "/b/api/share/download/info",
-                json!({"ShareKey":share.id,"FileID":file.id,"S3KeyFlag":text(&metadata["S3KeyFlag"]),"Size":file.size,"Etag":text(&metadata["Etag"])}),
+                json!({"ShareKey":share.id,"FileID":file.id,"S3KeyFlag":text(&metadata["S3KeyFlag"]),"Size":file.size,"Etag":etag}),
             )
         } else {
             (
                 "/api/file/download_info",
-                json!({"driveId":0,"etag":text(&metadata["Etag"]),"fileId":file.id.parse::<u64>().map_err(|_|"123 文件标识无效")?,"s3keyFlag":text(&metadata["S3KeyFlag"]),"type":0,"fileName":file.name,"size":file.size}),
+                json!({"driveId":0,"etag":etag,"fileId":file.id.parse::<u64>().map_err(|_|"123 文件标识无效")?,"s3keyFlag":text(&metadata["S3KeyFlag"]),"type":0,"fileName":file.name,"size":file.size}),
             )
         };
         let value = self
@@ -197,77 +249,144 @@ impl Session {
             .as_str()
             .or_else(|| value["data"]["DownloadUrl"].as_str())
             .ok_or("123 未返回下载链接，请检查下载权益与流量限制")?;
-        let mut address = decode_download(address)?;
-        // JSON redirect responses are resolved without credentials, only within CDN domains.
-        for _ in 0..5 {
-            address = decode_download(&address)?;
-            let url = super::validate_download(self.provider, &address)?;
-            if !url
-                .query_pairs()
-                .any(|(key, value)| key == "auto_redirect" && value == "0")
-            {
-                return Ok(address);
-            }
-            let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .map_err(|_| "无法初始化 123 下载连接")?;
-            let response = client
-                .get(url)
-                .header("Referer", "https://yun.123pan.cn/")
-                .header("Range", "bytes=0-8191")
-                .send()
-                .await
-                .map_err(|_| "123 下载地址检查失败")?;
-            if response.status().is_redirection() {
-                let location = response
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|value| value.to_str().ok())
-                    .ok_or("123 下载跳转缺少地址")?;
-                address = response
-                    .url()
-                    .join(location)
-                    .map_err(|_| "123 下载跳转地址无效")?
-                    .to_string();
-                continue;
-            }
-            if response
-                .content_length()
-                .is_some_and(|length| length <= 8192)
-            {
-                let bytes = response.bytes().await.map_err(|_| "123 下载地址响应无效")?;
-                if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                    if let Some(next) = value["data"]["redirect_url"].as_str() {
-                        address = next.into();
-                        continue;
-                    }
+        self.resolve_pan123_download(address, &etag).await
+    }
+
+    async fn resolve_pan123_download(&self, address: &str, etag: &str) -> Result<String, String> {
+        // The API session carries account credentials. CDN requests only need the download headers.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(crate::quark::USER_AGENT)
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|_| "无法初始化 123 下载连接")?;
+        let mut url = decode_download(address, None)?;
+        let range = format!("bytes=0-{}", MAX_REDIRECT_BODY - 1);
+        for _ in 0..=MAX_REDIRECTS {
+            url = validate_node(url)?;
+            let request = || {
+                client
+                    .get(self.endpoint(url.as_str()))
+                    .header(REFERER, "https://yun.123pan.cn/")
+                    .header(ACCEPT_ENCODING, "identity")
+            };
+            let response = match request().header(RANGE, range.as_str()).send().await {
+                Ok(response) if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE => {
+                    request().send().await
                 }
+                result => result,
             }
-            return Ok(address);
+            .map_err(|_| format!("123 云盘下载节点连接失败（{}）", node_name(&url)))?;
+            let status = response.status();
+            let next = if status.is_redirection() {
+                response
+                    .headers()
+                    .get(LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or("123 下载跳转缺少地址")?
+                    .to_owned()
+            } else if status.is_success() {
+                match json_redirect(response, etag).await? {
+                    Some(target) => target,
+                    None => return Ok(url.into()),
+                }
+            } else {
+                return Err(format!(
+                    "123 云盘下载节点返回 HTTP {}（{}）",
+                    status.as_u16(),
+                    node_name(&url)
+                ));
+            };
+            url = decode_download(&next, Some(&url))?;
         }
         Err("123 下载跳转次数过多，请稍后重试".into())
     }
+}
+
+async fn json_redirect(
+    mut response: reqwest::Response,
+    etag: &str,
+) -> Result<Option<String>, String> {
+    let attachment = response
+        .headers()
+        .get(CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("attachment"));
+    let total_size = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit_once('/'))
+        .and_then(|(_, size)| size.parse::<u64>().ok())
+        .or_else(|| response.content_length());
+    if attachment || total_size.is_some_and(|n| n > MAX_REDIRECT_BODY as u64) {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| "123 下载地址响应无效")? {
+        if chunk.len() > MAX_REDIRECT_BODY - bytes.len() {
+            return Ok(None);
+        }
+        bytes.extend_from_slice(&chunk);
+        if bytes
+            .iter()
+            .find(|c| !c.is_ascii_whitespace())
+            .is_some_and(|c| *c != b'{')
+        {
+            return Ok(None);
+        }
+    }
+    let Ok(body) = std::str::from_utf8(&bytes) else {
+        return Ok(None);
+    };
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Ok(None);
+    };
+    let Some(target) = value["data"]["redirect_url"].as_str() else {
+        return Ok(None);
+    };
+    // A user's own JSON file can contain the same fields as a CDN redirect.
+    if crypto::md5_hex(body).eq_ignore_ascii_case(etag) {
+        return Ok(None);
+    }
+    Ok(Some(target.to_owned()))
 }
 fn next_cursor(data: &Value, length: usize) -> Option<String> {
     let next = text(&data["Next"]);
     (length > 0 && next != "-1" && (data.get("Next").is_some() || length == 100)).then_some(next)
 }
-pub fn decode_download(value: &str) -> Result<String, String> {
-    let decoded = if let Ok(url) = url::Url::parse(value) {
-        if let Some((_, parameters)) = url.query_pairs().find(|(key, _)| key == "params") {
-            String::from_utf8(crypto::base64_decode(&parameters)?)
-                .map_err(|_| "123 下载地址编码无效")?
-        } else {
-            value.into()
+pub(super) fn decode_download(value: &str, base: Option<&Url>) -> Result<Url, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("123 下载地址为空".into());
+    }
+    let mut url = Url::parse(value)
+        .ok()
+        .or_else(|| base64_url(value))
+        .or_else(|| base?.join(value).ok())
+        .ok_or("123 下载地址无效")?;
+    // Some API versions use a different path for the same base64 URL wrapper.
+    for _ in 0..2 {
+        let Some((_, parameters)) = url.query_pairs().find(|(key, _)| key == "params") else {
+            break;
+        };
+        match base64_url(&parameters.replace(' ', "+")) {
+            Some(inner) => url = inner,
+            None if url.path().trim_end_matches('/').ends_with("/download-v2") => {
+                return Err("123 下载地址编码无效".into());
+            }
+            None => break,
         }
-    } else {
-        String::from_utf8(crypto::base64_decode(value)?).map_err(|_| "123 下载地址编码无效")?
-    };
-    let mut url = url::Url::parse(&decoded).map_err(|_| "123 下载地址无效")?;
+    }
     if url.scheme() == "http" {
         let _ = url.set_scheme("https");
     }
-    Ok(url.to_string())
+    Ok(url)
+}
+
+fn base64_url(value: &str) -> Option<Url> {
+    let bytes = crypto::base64_decode(value).ok()?;
+    let url = Url::parse(std::str::from_utf8(&bytes).ok()?).ok()?;
+    matches!(url.scheme(), "http" | "https").then_some(url)
 }
