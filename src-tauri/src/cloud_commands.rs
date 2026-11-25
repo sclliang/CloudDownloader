@@ -1,4 +1,6 @@
-use crate::{model::*, providers::cloud::Listing, session, start_task, trusted, AppState};
+use crate::{
+    model::*, providers::cloud::Listing, session, start_batch, trusted, AppState, PreparedSource,
+};
 use std::{collections::HashSet, path::PathBuf};
 use tauri::{State, WebviewWindow};
 
@@ -50,19 +52,21 @@ pub async fn cloud_enqueue(
             .ok_or("请先选择下载目录")?,
     );
     let mut pending = Vec::new();
-    for selected in files {
-        let fresh = session.cloud_find(&selected).await?.file;
+    let refreshed = session.cloud_find_many(&files).await?;
+    for (selected, entry) in files.into_iter().zip(refreshed) {
+        let fresh = &entry.file;
         if fresh.size != selected.size
             || fresh.is_dir != selected.is_dir
             || fresh.name != selected.name
         {
             return Err("文件列表已变化，请刷新后重新选择".into());
         }
-        pending.push((fresh, directory.clone()));
+        pending.push((entry, directory.clone()));
     }
     let mut visited = HashSet::new();
     let mut downloads = Vec::new();
-    while let Some((file, directory)) = pending.pop() {
+    while let Some((entry, directory)) = pending.pop() {
+        let file = &entry.file;
         if !visited.insert(file.id.clone()) {
             continue;
         }
@@ -79,7 +83,7 @@ pub async fn cloud_enqueue(
                     batch
                         .entries
                         .into_iter()
-                        .map(|entry| (entry.file, directory.join(safe_name(&file.name)))),
+                        .map(|entry| (entry, directory.join(safe_name(&file.name)))),
                 );
                 if visited.len() + pending.len() > 10000 {
                     return Err("所选文件超过 10000 项，请分批下载".into());
@@ -93,12 +97,13 @@ pub async fn cloud_enqueue(
                 }
             }
         } else {
-            downloads.push((file, directory))
+            downloads.push((entry, directory))
         }
     }
     let mut tasks = Vec::new();
-    for (file, directory) in downloads {
-        let existing = state.store.lock().unwrap().tasks()?;
+    let mut existing = state.store.lock().unwrap().tasks()?;
+    for (entry, directory) in downloads {
+        let file = entry.file.clone();
         if existing.iter().any(|task| {
             task.share.provider == provider
                 && task.own.as_ref().is_some_and(|source| {
@@ -144,10 +149,17 @@ pub async fn cloud_enqueue(
             bt: None,
             upload_speed: 0,
         };
-        tasks.push(start_task(&app, &state, task, None).await?);
+        existing.push(task.clone());
+        tasks.push((
+            task,
+            PreparedSource::Cloud {
+                session: session.clone(),
+                entry,
+            },
+        ));
     }
     if tasks.is_empty() {
         return Err("文件夹为空，或所选文件已在下载列表中".into());
     }
-    Ok(tasks)
+    start_batch(&app, &state, tasks).await
 }

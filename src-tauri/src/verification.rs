@@ -5,6 +5,27 @@ use serde_json::{json, Value};
 use std::{path::PathBuf, time::Duration};
 use tauri::Manager;
 
+#[path = "verification_downloads.rs"]
+mod downloads;
+
+pub(crate) fn download_diagnostic(stage: &str, data: Value) {
+    if std::env::args().any(|arg| arg == "--verify-download-optimizations") {
+        let _ = std::fs::write(
+            downloads::directory().join(format!("{stage}.json")),
+            serde_json::to_vec_pretty(&data).unwrap(),
+        );
+    }
+}
+
+pub fn database_path(normal: PathBuf) -> Result<PathBuf, String> {
+    if std::env::args().any(|arg| arg == "--verify-download-optimizations") {
+        std::fs::create_dir_all(downloads::directory()).map_err(|e| e.to_string())?;
+        Ok(downloads::directory().join("tasks.sqlite3"))
+    } else {
+        Ok(normal)
+    }
+}
+
 pub fn start(app: tauri::AppHandle, mode: String) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -15,6 +36,8 @@ pub fn start(app: tauri::AppHandle, mode: String) {
             pan115_cookie_fixture(&app, mode.ends_with("restore")).await
         } else if mode == "--verify-pan115-session" {
             pan115_session_probe(&app).await
+        } else if mode == "--verify-download-optimizations" {
+            downloads::run(&app).await
         } else if mode == "--verify-cloud-diagnostics" {
             async {
                 let session = session::connect(&app, Provider::C139).await?;
@@ -39,7 +62,9 @@ pub fn start(app: tauri::AppHandle, mode: String) {
         let dir = output_dir();
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(
-            dir.join(if mode == "--verify-pan115-session" {
+            dir.join(if mode == "--verify-download-optimizations" {
+                "download-optimizations.json"
+            } else if mode == "--verify-pan115-session" {
                 "pan115-session-probe.json"
             } else if mode == "--verify-pan115-cache-seed" {
                 "pan115-cache-seed.json"

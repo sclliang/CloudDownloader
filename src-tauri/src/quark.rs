@@ -1,7 +1,8 @@
 use crate::model::{ShareFile, ShareLink, ShareListing};
+use crate::network::send_read_request;
 #[cfg(test)]
 use crate::providers::parse_share;
-use reqwest::{cookie::Jar, Client, Method};
+use reqwest::{cookie::Jar, Client, Method, StatusCode};
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
 use url::Url;
@@ -15,6 +16,14 @@ pub const DOWNLOAD_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Appl
 pub struct Quark {
     pub client: Client,
     pub jar: Arc<Jar>,
+    download_grant: Arc<tokio::sync::Mutex<Option<DownloadGrant>>>,
+    #[cfg(test)]
+    pub test_endpoint: Option<String>,
+}
+
+struct DownloadGrant {
+    token: String,
+    expires_at: u64,
 }
 
 impl Quark {
@@ -27,16 +36,35 @@ impl Quark {
             .connect_timeout(Duration::from_secs(12))
             .build()
             .map_err(|e| e.to_string())?;
-        Ok(Self { client, jar })
+        Ok(Self {
+            client,
+            jar,
+            download_grant: Arc::new(tokio::sync::Mutex::new(None)),
+            #[cfg(test)]
+            test_endpoint: None,
+        })
     }
 
-    async fn call(
+    fn endpoint(&self, address: &str) -> String {
+        #[cfg(test)]
+        if let Some(base) = &self.test_endpoint {
+            let url = Url::parse(address).unwrap();
+            return format!(
+                "{base}{}{}",
+                url.path(),
+                url.query().map(|q| format!("?{q}")).unwrap_or_default()
+            );
+        }
+        address.into()
+    }
+
+    async fn request(
         &self,
         method: Method,
         path: &str,
         query: &[(&str, String)],
         body: Option<Value>,
-    ) -> Result<Value, String> {
+    ) -> Result<(StatusCode, Value), String> {
         let mut url = Url::parse(&format!("{API}{path}")).map_err(|_| "接口地址无效")?;
         url.query_pairs_mut()
             .append_pair("pr", "ucpro")
@@ -46,7 +74,7 @@ impl Quark {
         }
         let mut req = self
             .client
-            .request(method, url)
+            .request(method, self.endpoint(url.as_str()))
             .header("Referer", format!("{ORIGIN}/"))
             .header("Origin", ORIGIN);
         if path == "file/download" {
@@ -57,7 +85,7 @@ impl Quark {
         if let Some(body) = body {
             req = req.json(&body);
         }
-        let response = req.send().await.map_err(|e| {
+        let response = send_read_request(req).await.map_err(|e| {
             if e.is_timeout() {
                 "连接夸克超时，请稍后重试".to_string()
             } else {
@@ -71,26 +99,29 @@ impl Quark {
                 status.as_u16()
             )
         })?;
-        if !status.is_success() || payload.get("code").and_then(Value::as_i64) != Some(0) {
-            let code = payload["code"].as_i64().unwrap_or(-1);
-            let msg = payload["message"].as_str().unwrap_or("请求未成功");
-            return Err(format!(
-                "夸克：{msg}（接口 {path}，HTTP {}，错误码 {code}）",
-                status.as_u16()
-            ));
-        }
-        Ok(payload)
+        Ok((status, payload))
+    }
+
+    async fn call(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<Value>,
+    ) -> Result<Value, String> {
+        let (status, payload) = self.request(method, path, query, body).await?;
+        check_response(path, status, payload)
     }
 
     pub async fn account(&self) -> Result<String, String> {
-        let response = self
-            .client
-            .get(format!("{ORIGIN}/account/info"))
-            .query(&[("fr", "pc"), ("platform", "pc")])
-            .header("Referer", format!("{ORIGIN}/"))
-            .send()
-            .await
-            .map_err(|_| "无法检查登录状态，请检查网络")?;
+        let response = send_read_request(
+            self.client
+                .get(self.endpoint(&format!("{ORIGIN}/account/info")))
+                .query(&[("fr", "pc"), ("platform", "pc")])
+                .header("Referer", format!("{ORIGIN}/")),
+        )
+        .await
+        .map_err(|_| "无法检查登录状态，请检查网络")?;
         let payload: Value = response.json().await.map_err(|_| "登录状态响应无效")?;
         account_name(&payload)
     }
@@ -157,8 +188,50 @@ impl Quark {
         file: &ShareFile,
         token: &str,
     ) -> Result<String, String> {
-        let grant = self.download_grant().await?;
-        let result = self.call(Method::POST, "file/download", &[], Some(json!({"fids":[file.id],"fids_token":[file.token],"pwd_id":share.id,"stoken":token,"token":grant,"speedup_session":""}))).await?;
+        self.download_file(&file.id, Some((share, file, token)))
+            .await
+    }
+
+    pub async fn download_file(
+        &self,
+        id: &str,
+        share: Option<(&ShareLink, &ShareFile, &str)>,
+    ) -> Result<String, String> {
+        let mut body = json!({"fids":[id], "speedup_session":""});
+        if let Some((share, file, token)) = share {
+            body["fids_token"] = json!([file.token]);
+            body["pwd_id"] = json!(share.id);
+            body["stoken"] = json!(token);
+        }
+        let mut response = None;
+        for attempt in 0..2 {
+            let grant = self.download_grant().await?;
+            body["token"] = json!(grant);
+            let (status, payload) = self
+                .request(Method::POST, "file/download", &[], Some(body.clone()))
+                .await?;
+            if status.is_success() && payload["code"].as_i64() == Some(0) {
+                response = Some(payload);
+                break;
+            }
+            let mut cached = self.download_grant.lock().await;
+            if cached.as_ref().is_some_and(|cached| cached.token == grant) {
+                *cached = None;
+            }
+            drop(cached);
+            if attempt == 1 || !expired_download_grant(status, &payload) {
+                check_response("file/download", status, payload)?;
+            }
+        }
+        let result = response.ok_or("夸克下载凭据已失效，请重试")?;
+        let rows = result["data"].as_array().ok_or("夸克下载地址响应无效")?;
+        if rows.len() != 1
+            || rows[0]
+                .get("fid")
+                .is_some_and(|fid| fid.as_str() != Some(id))
+        {
+            return Err("夸克返回的下载文件不匹配，请刷新列表".into());
+        }
         let url = result["data"]
             .as_array()
             .and_then(|a| a.first())
@@ -169,13 +242,23 @@ impl Quark {
     }
 
     async fn download_grant(&self) -> Result<String, String> {
+        // Each browser-session snapshot owns its cache. Concurrent files in one
+        // batch share a refresh, while a new login snapshot starts with no grant.
+        let mut cached = self.download_grant.lock().await;
         let stamp = crate::model::now();
-        let response = self.client.post("https://drive-social-api.quark.cn/1/clouddrive/chat/conv/file/acquire_dl_token")
+        if let Some(grant) = cached
+            .as_ref()
+            .filter(|grant| grant.expires_at > stamp.saturating_add(60))
+        {
+            return Ok(grant.token.clone());
+        }
+        *cached = None;
+        let response = send_read_request(self.client.post(self.endpoint("https://drive-social-api.quark.cn/1/clouddrive/chat/conv/file/acquire_dl_token"))
             .query(&[("pr", "ucpro"), ("fr", "pc"), ("sys", "win32"), ("ve", "6.9.7.761"), ("la", "zh-CN"), ("ch", "pckk@product_guanwan")])
             .header("User-Agent", DOWNLOAD_AGENT)
             .header("Referer", format!("{ORIGIN}/"))
-            .json(&json!({"conversation_id":format!("300000{stamp}"),"conversation_type":3,"msg_id":format!("{stamp}000")}))
-            .send().await.map_err(|_| "申请下载凭据失败，请检查网络")?;
+            .json(&json!({"conversation_id":format!("300000{stamp}"),"conversation_type":3,"msg_id":format!("{stamp}000")})))
+            .await.map_err(|_| "申请下载凭据失败，请检查网络")?;
         let status = response.status();
         let payload: Value = response
             .json()
@@ -189,12 +272,60 @@ impl Quark {
                 payload["code"]
             ));
         }
-        payload["data"]["token"]
+        let token = payload["data"]["token"]
             .as_str()
             .filter(|token| !token.is_empty())
             .map(String::from)
-            .ok_or("夸克没有返回下载凭据".into())
+            .ok_or("夸克没有返回下载凭据")?;
+        let expiration = payload["data"]["expired_timestamp"]
+            .as_u64()
+            .or_else(|| {
+                payload["data"]["expired_timestamp"]
+                    .as_str()
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(0);
+        let expires_at = if expiration > 1_000_000_000_000 {
+            expiration / 1000
+        } else {
+            expiration
+        };
+        if expires_at > stamp.saturating_add(60) {
+            *cached = Some(DownloadGrant {
+                token: token.clone(),
+                expires_at,
+            });
+        }
+        Ok(token)
     }
+}
+
+fn expired_download_grant(status: StatusCode, payload: &Value) -> bool {
+    let message = payload["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+        || ((message.contains("token") || message.contains("凭据") || message.contains("令牌"))
+            && ["expired", "invalid", "过期", "失效"]
+                .iter()
+                .any(|word| message.contains(word)))
+}
+
+fn check_response(path: &str, status: StatusCode, payload: Value) -> Result<Value, String> {
+    if !status.is_success() || payload["code"].as_i64() != Some(0) {
+        let code = payload["code"].as_i64().unwrap_or(-1);
+        let message = match code {
+            31001 => "登录已过期，请在官方窗口重新登录",
+            23018 => "文件超出游客下载大小上限，请先登录",
+            _ => payload["message"].as_str().unwrap_or("请求未成功"),
+        };
+        return Err(format!(
+            "夸克：{message}（接口 {path}，HTTP {}，错误码 {code}）",
+            status.as_u16()
+        ));
+    }
+    Ok(payload)
 }
 
 fn account_name(payload: &Value) -> Result<String, String> {

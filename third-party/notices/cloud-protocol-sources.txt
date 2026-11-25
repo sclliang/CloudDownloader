@@ -34,3 +34,15 @@ fixtures were implemented in CloudDownloader; no upstream Kotlin source files
 or binaries are bundled. Browser account passwords are entered only on the
 official provider pages, not collected or saved by CloudDownloader.
 The official ilanzou.com web client was also checked for its appToken cookie.
+
+Additional references reviewed on 2026-11-25
+LinkSwift: https://github.com/hmjz100/LinkSwift
+Reviewed main revision: 9fb5b9c7a069a02b335788b1352d107c7308a6f6
+Reviewed dev revision: 094a28272f435991156fec8b0cd0296ca476d9c7
+Reference project license: GNU Affero General Public License version 3.0 or later
+The upstream userscript header identifies its license as AGPL-3.0-or-later.
+References: 123 v2 download endpoint paths and request/response fields;
+Quark download-grant expiration and required download credential fields.
+CloudDownloader implements these protocol behaviors in its existing Rust
+adapters with session-scoped caching and bounded batch preparation.
+No LinkSwift script source or executable is bundled or executed.

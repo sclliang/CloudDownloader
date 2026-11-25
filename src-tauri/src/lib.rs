@@ -8,6 +8,7 @@ mod drive_commands;
 mod engine;
 mod migration;
 mod model;
+mod network;
 mod pan115_session;
 mod providers;
 mod quark;
@@ -21,6 +22,7 @@ mod upload;
 mod verification;
 
 use engine::{Engine, Rpc};
+use futures_util::{stream, StreamExt};
 use model::*;
 use serde_json::json;
 use std::{
@@ -175,11 +177,44 @@ fn set_directory(
         .set_setting("download_dir", &path)
 }
 
+enum PreparedSource {
+    Direct(direct::Metadata),
+    Share {
+        session: providers::Session,
+        token: String,
+    },
+    Cloud {
+        session: providers::Session,
+        entry: providers::cloud::Entry,
+    },
+    Baidu(providers::Session),
+}
+
+async fn start_batch(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    tasks: Vec<(Task, PreparedSource)>,
+) -> Result<Vec<Task>, String> {
+    // Keep draining after a per-task failure so an in-flight engine submission
+    // always reaches its final database update. Callers hold resolving.
+    state
+        .store
+        .lock()
+        .unwrap()
+        .save_batch(tasks.iter().map(|(task, _)| task))?;
+    let results = stream::iter(tasks)
+        .map(|(task, source)| start_task(app, state, task, Some(source)))
+        .buffered(3)
+        .collect::<Vec<_>>()
+        .await;
+    results.into_iter().collect()
+}
+
 async fn start_task(
     app: &tauri::AppHandle,
     state: &AppState,
     mut task: Task,
-    prepared_direct: Option<direct::Metadata>,
+    prepared: Option<PreparedSource>,
 ) -> Result<Task, String> {
     task.status = "resolving".into();
     task.error.clear();
@@ -201,9 +236,10 @@ async fn start_task(
             return rpc(state)?.add_bt(&data, &task).await;
         }
         if let Some(source) = &mut task.direct {
-            let metadata = match prepared_direct {
-                Some(metadata) => metadata,
+            let metadata = match prepared {
+                Some(PreparedSource::Direct(metadata)) => metadata,
                 None => direct::probe(&source.url).await?,
+                _ => return Err("下载来源与任务类型不一致".into()),
             };
             let partial = task.completed > 0
                 || PathBuf::from(&task.directory)
@@ -217,29 +253,47 @@ async fn start_task(
                 .add_direct(source, &task.directory, &task.name)
                 .await;
         }
-        let session = session::connect(app, task.share.provider).await?;
-        if task.own.is_some() || !task.share.provider.anonymous_share() {
-            session.account().await?;
-        }
-        let download = if let Some(source) = &task.own {
-            if task.share.provider == Provider::Baidu {
-                session.drive_download(source).await?
-            } else {
-                session.cloud_download(source).await?
+        let download = match prepared {
+            Some(PreparedSource::Share { session, token }) => {
+                session.download(&task.share, &task.file, &token).await?
             }
-        } else {
-            let listing = session.list(&task.share, &task.file.parent_id).await?;
-            let fresh = listing
-                .files
-                .into_iter()
-                .find(|f| f.id == task.file.id)
-                .ok_or("分享中的文件已经被移除")?;
-            if task.completed > 0 && fresh.size != task.file.size {
-                return Err("源文件大小已变化，请重新解析分享并创建新任务".into());
+            Some(PreparedSource::Cloud { session, entry }) => {
+                session
+                    .cloud_download_entry(task.own.as_ref().ok_or("个人文件来源缺失")?, entry)
+                    .await?
             }
-            session
-                .download(&task.share, &fresh, &listing.stoken)
-                .await?
+            Some(PreparedSource::Baidu(session)) => {
+                session
+                    .drive_download(task.own.as_ref().ok_or("个人文件来源缺失")?)
+                    .await?
+            }
+            Some(PreparedSource::Direct(_)) => return Err("下载来源与任务类型不一致".into()),
+            None => {
+                let session = session::connect(app, task.share.provider).await?;
+                if task.own.is_some() || !task.share.provider.anonymous_share() {
+                    session.account().await?;
+                }
+                if let Some(source) = &task.own {
+                    if task.share.provider == Provider::Baidu {
+                        session.drive_download(source).await?
+                    } else {
+                        session.cloud_download(source).await?
+                    }
+                } else {
+                    let listing = session.list(&task.share, &task.file.parent_id).await?;
+                    let fresh = listing
+                        .files
+                        .into_iter()
+                        .find(|f| f.id == task.file.id)
+                        .ok_or("分享中的文件已经被移除")?;
+                    if task.completed > 0 && fresh.size != task.file.size {
+                        return Err("源文件大小已变化，请重新解析分享并创建新任务".into());
+                    }
+                    session
+                        .download(&task.share, &fresh, &listing.stoken)
+                        .await?
+                }
+            }
         };
         if let Some(size) = download.size {
             if task.completed > 0 && task.size > 0 && size != task.size {
@@ -313,13 +367,13 @@ async fn enqueue(
     if selected.len() != ids.len() {
         return Err("文件列表已变化，请重新解析分享".into());
     }
-    let mut pending: Vec<(ShareFile, PathBuf)> = selected
+    let mut pending: Vec<(ShareFile, PathBuf, String)> = selected
         .into_iter()
-        .map(|f| (f, PathBuf::from(&directory)))
+        .map(|f| (f, PathBuf::from(&directory), listing.stoken.clone()))
         .collect();
     let mut files = Vec::new();
     let mut visited = HashSet::new();
-    while let Some((file, dir)) = pending.pop() {
+    while let Some((file, dir, token)) = pending.pop() {
         if !visited.insert(file.id.clone()) {
             continue;
         }
@@ -329,14 +383,19 @@ async fn enqueue(
         if file.is_dir {
             let listing = session.list(&share, &file.id).await?;
             let subdir = dir.join(safe_name(&file.name));
-            pending.extend(listing.files.into_iter().map(|f| (f, subdir.clone())));
+            pending.extend(
+                listing
+                    .files
+                    .into_iter()
+                    .map(|f| (f, subdir.clone(), listing.stoken.clone())),
+            );
         } else {
-            files.push((file, dir));
+            files.push((file, dir, token));
         }
     }
     let mut created = Vec::new();
-    for (file, dir) in files {
-        let existing = state.store.lock().unwrap().tasks()?;
+    let mut existing = state.store.lock().unwrap().tasks()?;
+    for (file, dir, token) in files {
         if existing.iter().any(|t| {
             t.share.provider == share.provider
                 && t.share.id == share.id
@@ -384,12 +443,19 @@ async fn enqueue(
             bt: None,
             upload_speed: 0,
         };
-        created.push(start_task(&app, &state, task, None).await?);
+        existing.push(task.clone());
+        created.push((
+            task,
+            PreparedSource::Share {
+                session: session.clone(),
+                token,
+            },
+        ));
     }
     if created.is_empty() {
         return Err("所选文件已在下载列表中，或文件夹为空".into());
     }
-    Ok(created)
+    start_batch(&app, &state, created).await
 }
 
 #[tauri::command]
@@ -566,7 +632,10 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             migration::migrate(&dir)?;
             std::fs::create_dir_all(&dir)?;
-            let store = store::Store::open(&dir.join("tasks.sqlite3"))?;
+            let database = dir.join("tasks.sqlite3");
+            #[cfg(debug_assertions)]
+            let database = verification::database_path(database)?;
+            let store = store::Store::open(&database)?;
             if store.setting("download_dir").is_none() {
                 let downloads = app
                     .path()
@@ -635,6 +704,7 @@ pub fn run() {
             if let Some(mode) = std::env::args().find(|a| {
                 a.starts_with("--verify-baidu-")
                     || a == "--verify-cloud-diagnostics"
+                    || a == "--verify-download-optimizations"
                     || matches!(
                         a.as_str(),
                         "--verify-pan115-cache-seed"

@@ -725,6 +725,13 @@ async fn fixture(
                     }
                 }
             };
+            let response = if response["__fixture_download_by_id"] == true {
+                let body: Value = serde_json::from_str(&request.body).unwrap();
+                let id = body["fids"][0].as_str().unwrap();
+                json!({"code":0,"data":[{"fid":id,"download_url":format!("https://cdn.quark.cn/{id}")}]})
+            } else {
+                response
+            };
             requests.push(request);
             if response["__fixture_disconnect"] == true {
                 continue;
@@ -758,7 +765,8 @@ async fn fixture(
         }
         requests
     });
-    let transport = Quark::new().unwrap();
+    let mut transport = Quark::new().unwrap();
+    transport.test_endpoint = Some(endpoint.clone());
     transport
         .jar
         .add_cookie_str("fixture_session=secret; Path=/", &endpoint.parse().unwrap());
@@ -784,14 +792,286 @@ async fn fixture(
 }
 
 #[tokio::test]
+async fn pan123_v2_uses_validated_candidate_nodes_and_falls_back_to_legacy_routes() {
+    let file = ShareFile {
+        id: "42".into(),
+        name: "sample.bin".into(),
+        size: 4,
+        is_dir: false,
+        parent_id: "0".into(),
+        token: json!({"Etag":"checksum","S3KeyFlag":"object"}).to_string(),
+    };
+    let (session, server) = fixture(
+        Provider::Pan123,
+        vec![
+            json!({"data":{"dispatchList":[
+            {"prefix":"https://untrusted.example.org"},
+            {"prefix":"https://cdn.123295.com/first"},
+            {"prefix":"https://cdn.123295.com/second"}
+        ],"downloadPath":"/file"}}),
+            json!({"__fixture_status":503,"__fixture_body":"busy"}),
+            json!({"__fixture_body":"data"}),
+        ],
+    )
+    .await;
+    assert_eq!(
+        session.pan123_download(&file, None).await.unwrap(),
+        "https://cdn.123295.com/second/file"
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].target, "/api/v2/file/download_info");
+    assert_eq!(requests[1].target, "/first/file");
+    assert_eq!(requests[2].target, "/second/file");
+    assert!(requests[1..]
+        .iter()
+        .all(|r| !r.headers.contains_key("authorization") && !r.headers.contains_key("cookie")));
+
+    let share = parse_share("https://www.123pan.com/s/fixture", "").unwrap();
+    let (session, server) = fixture(
+        Provider::Pan123,
+        vec![
+            json!({"__fixture_status":404,"__fixture_body":"unsupported"}),
+            json!({"code":0,"data":{"DownloadURL":"https://cdn.123295.com/legacy"}}),
+            json!({"__fixture_body":"data"}),
+        ],
+    )
+    .await;
+    assert_eq!(
+        session.pan123_download(&file, Some(&share)).await.unwrap(),
+        "https://cdn.123295.com/legacy"
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests[0].target, "/api/v2/share/download/info");
+    let v2_body: Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(v2_body["S3keyFlag"], "object");
+    assert_eq!(v2_body["FileID"], 42);
+    assert!(v2_body.get("S3KeyFlag").is_none());
+    assert_eq!(requests[1].target, "/b/api/share/download/info");
+    let legacy_body: Value = serde_json::from_str(&requests[1].body).unwrap();
+    assert_eq!(legacy_body["S3KeyFlag"], "object");
+    assert_eq!(legacy_body["FileID"], "42");
+    assert_eq!(requests[1].headers["platform"], "android");
+    for code in [5112, 5113] {
+        let (session, server) = fixture(Provider::Pan123, vec![json!({"code":code})]).await;
+        let error = session.pan123_download(&file, None).await.unwrap_err();
+        assert!(error.contains(if code == 5112 { "登录" } else { "流量" }));
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+    assert!(cloud::check(Provider::Pan123, json!({"code":"200"})).is_ok());
+    assert!(cloud::check(Provider::Pan123, json!({"code":-1}))
+        .unwrap_err()
+        .contains("-1"));
+}
+
+#[tokio::test]
+async fn quark_read_requests_recover_from_disconnects_but_preserve_denials() {
+    let (session, server) = fixture(
+        Provider::Quark,
+        vec![
+            json!({"__fixture_disconnect":true}),
+            json!({"success":true,"data":{"nickname":"fixture"}}),
+            json!({"__fixture_disconnect":true}),
+            json!({"code":0,"data":{"token":"grant","expired_timestamp":(now()+600)*1000}}),
+            json!({"__fixture_disconnect":true}),
+            json!({"__fixture_download_by_id":true}),
+            json!({"code":23018,"message":"permission denied"}),
+        ],
+    )
+    .await;
+    assert_eq!(session.account().await.unwrap(), "fixture");
+    assert_eq!(
+        session
+            .transport
+            .download_file("first", None)
+            .await
+            .unwrap(),
+        "https://cdn.quark.cn/first"
+    );
+    assert!(session
+        .transport
+        .download_file("denied", None)
+        .await
+        .unwrap_err()
+        .contains("游客"));
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 7);
+    assert!(requests[0].target.contains("account/info"));
+    assert_eq!(requests[0].target, requests[1].target);
+    assert_eq!(requests[2].target, requests[3].target);
+    assert_eq!(requests[4].body, requests[5].body);
+}
+
+#[tokio::test]
+async fn quark_concurrent_downloads_share_a_grant_and_refresh_an_expired_grant_once() {
+    let by_id = json!({"__fixture_download_by_id":true});
+    let expiration = (now() + 600) * 1000;
+    let (session, server) = fixture(
+        Provider::Quark,
+        vec![
+            json!({"code":0,"data":{"token":"first","expired_timestamp":expiration}}),
+            by_id.clone(),
+            by_id.clone(),
+            json!({"code":400,"message":"download token expired"}),
+            json!({"code":0,"data":{"token":"second","expired_timestamp":expiration}}),
+            by_id,
+        ],
+    )
+    .await;
+    let (first, second) = tokio::join!(
+        session.transport.download_file("a", None),
+        session.transport.download_file("b", None),
+    );
+    assert_eq!(first.unwrap(), "https://cdn.quark.cn/a");
+    assert_eq!(second.unwrap(), "https://cdn.quark.cn/b");
+    assert_eq!(
+        session.transport.download_file("c", None).await.unwrap(),
+        "https://cdn.quark.cn/c"
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 6);
+    assert!(requests[0].target.contains("acquire_dl_token"));
+    assert!(requests[4].target.contains("acquire_dl_token"));
+    for index in [1, 2, 3] {
+        assert_eq!(
+            serde_json::from_str::<Value>(&requests[index].body).unwrap()["token"],
+            "first"
+        );
+    }
+    assert_eq!(
+        serde_json::from_str::<Value>(&requests[5].body).unwrap()["token"],
+        "second"
+    );
+}
+
+#[tokio::test]
+async fn quark_grants_expire_early_and_are_isolated_between_browser_sessions() {
+    let by_id = json!({"__fixture_download_by_id":true});
+    let grant = |token: &str, seconds| json!({"code":0,"data":{"token":token,"expired_timestamp":(now()+seconds)*1000}});
+    let (session, server) = fixture(
+        Provider::Quark,
+        vec![
+            grant("nearly-expired", 30),
+            by_id.clone(),
+            grant("valid", 600),
+            by_id.clone(),
+            grant("new-session", 600),
+            by_id,
+        ],
+    )
+    .await;
+    session.transport.download_file("a", None).await.unwrap();
+    session.transport.download_file("b", None).await.unwrap();
+    let mut other = Quark::new().unwrap();
+    other.test_endpoint = session.test_endpoint.clone();
+    other.download_file("c", None).await.unwrap();
+    let requests = server.await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r.target.contains("acquire_dl_token"))
+            .count(),
+        3
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&requests[5].body).unwrap()["token"],
+        "new-session"
+    );
+}
+
+#[tokio::test]
+async fn quark_downloads_keep_share_credentials_and_reject_mismatched_files() {
+    let (session, server) = fixture(Provider::Quark, vec![
+        json!({"code":0,"data":{"token":"grant","expired_timestamp":(now()+600)*1000}}),
+        json!({"code":0,"data":[{"fid":"a","download_url":"https://quark-cdn.aliyuncs.com/a"}]}),
+        json!({"code":0,"data":[{"fid":"other","download_url":"https://cdn.quark.cn/other"}]}),
+    ]).await;
+    let api = "https://drive-pc.quark.cn/".parse().unwrap();
+    session
+        .transport
+        .jar
+        .add_cookie_str("__pugs=encoded%2Fsession; Path=/", &api);
+    session
+        .transport
+        .jar
+        .add_cookie_str("unrelated_login_secret=private; Path=/", &api);
+    let share = parse_share("https://pan.quark.cn/s/fixture", "").unwrap();
+    let file = ShareFile {
+        id: "a".into(),
+        name: "a.bin".into(),
+        size: 4,
+        is_dir: false,
+        parent_id: "0".into(),
+        token: "file-token".into(),
+    };
+    let download = session
+        .download(&share, &file, "share-token")
+        .await
+        .unwrap();
+    assert!(download
+        .headers
+        .contains(&"Cookie: __pugs=encoded%2Fsession".into()));
+    assert!(!download
+        .headers
+        .iter()
+        .any(|v| v.contains("private") || v.contains("unrelated")));
+    assert!(session
+        .transport
+        .download_file("a", None)
+        .await
+        .unwrap_err()
+        .contains("不匹配"));
+    let requests = server.await.unwrap();
+    let body: Value = serde_json::from_str(&requests[1].body).unwrap();
+    assert_eq!(body["fids_token"], json!(["file-token"]));
+    assert_eq!(body["stoken"], "share-token");
+    assert_eq!(body["pwd_id"], "fixture");
+    assert_eq!(requests[1].headers["user-agent"], download.user_agent);
+}
+
+#[tokio::test]
+async fn batch_cloud_lookup_reads_each_directory_once_and_preserves_file_mapping() {
+    let a = json!({"fid":"a","file_name":"same.zip","size":11,"dir":false,"md5":"hash-a"});
+    let b = json!({"fid":"b","file_name":"same.zip","size":22,"dir":false,"md5":"hash-b"});
+    let (session, server) = fixture(
+        Provider::Quark,
+        vec![json!({"code":0,"data":{"list":[a.clone(),b.clone()]},"metadata":{"_total":2}})],
+    )
+    .await;
+    let files = vec![
+        cloud::entry(Provider::Quark, &b, "/").unwrap().file,
+        cloud::entry(Provider::Quark, &a, "/").unwrap().file,
+    ];
+    let fresh = session.cloud_find_many(&files).await.unwrap();
+    assert_eq!(fresh[0].file.id, "b");
+    assert_eq!(fresh[0].file.size, 22);
+    assert_eq!(fresh[1].file.id, "a");
+    assert_eq!(fresh[1].file.md5, "hash-a");
+    assert_eq!(server.await.unwrap().len(), 1);
+    let wrong = OwnSource {
+        account_id: "fixture".into(),
+        file: files[0].clone(),
+    };
+    assert!(session
+        .cloud_download_entry(&wrong, fresh[1].clone())
+        .await
+        .err()
+        .unwrap()
+        .contains("源文件已变化"));
+}
+
+#[tokio::test]
 async fn quark_personal_download_refreshes_metadata_before_issuing_url() {
     let raw =
         json!({"fid":"q123","file_name":"fixture.txt","size":32,"dir":false,"md5":"checksum"});
     let (session, server) = fixture(
         Provider::Quark,
         vec![
+            json!({"__fixture_disconnect":true}),
             json!({"success":true,"data":{"uid":"quark-fixture"}}),
+            json!({"__fixture_disconnect":true}),
             json!({"code":0,"data":{"list":[raw.clone()]},"metadata":{"_total":1}}),
+            json!({"code":0,"data":{"token":"download-fixture"}}),
             json!({"code":0,"data":[{"download_url":"https://cdn.quark.cn/fixture"}]}),
         ],
     )
@@ -803,12 +1083,19 @@ async fn quark_personal_download_refreshes_metadata_before_issuing_url() {
     let download = session.cloud_download(&source).await.unwrap();
     assert_eq!(download.url, "https://cdn.quark.cn/fixture");
     let requests = server.await.unwrap();
-    assert!(requests[1].target.contains("pdir_fid=0"));
+    assert_eq!(requests.len(), 6);
+    assert_eq!(requests[0].target, requests[1].target);
+    assert_eq!(requests[2].target, requests[3].target);
+    assert!(requests[3].target.contains("pdir_fid=0"));
     assert_eq!(
-        serde_json::from_str::<Value>(&requests[2].body).unwrap()["fids"],
+        serde_json::from_str::<Value>(&requests[5].body).unwrap()["fids"],
         json!(["q123"])
     );
-    assert!(requests[2].headers["user-agent"].contains("QuarkPC/"));
+    assert!(requests[5].headers["user-agent"].contains("QuarkPC/"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&requests[5].body).unwrap()["token"],
+        "download-fixture"
+    );
 }
 
 #[tokio::test]
@@ -839,13 +1126,18 @@ async fn pan123_personal_download_follows_unmarked_redirects_without_api_credent
     assert_eq!(download.url, target);
     assert_eq!(download.headers.len(), 1);
     let requests = server.await.unwrap();
-    for request in &requests[..3] {
+    for request in &requests[..2] {
         assert_eq!(request.headers["authorization"], "Bearer fixture-bearer");
         assert_eq!(request.headers["loginuuid"], session.device_id);
         assert!(
             request.headers.contains_key("auth-key") && request.headers.contains_key("auth-value")
         );
     }
+    assert_eq!(requests[2].target, "/api/v2/file/download_info");
+    assert_eq!(
+        requests[2].headers["authorization"],
+        "Bearer fixture-bearer"
+    );
     assert_eq!(requests[3].target, "/lookup");
     assert_eq!(requests[4].target, "/routes/start");
     assert_eq!(requests[5].target, "/files/fixture?params=opaque-signature");

@@ -210,12 +210,12 @@ pub async fn inspect_download(
 }
 
 async fn inspect_http(base: &Path, url: &str) -> Result<Inspection, String> {
-    if url::Url::parse(&url).is_ok_and(|v| v.path().to_ascii_lowercase().ends_with(".torrent")) {
+    if url::Url::parse(url).is_ok_and(|v| v.path().to_ascii_lowercase().ends_with(".torrent")) {
         return Ok(Inspection::Bt {
-            torrent: bt::cache(&base, &fetch_torrent(&url).await?)?,
+            torrent: bt::cache(base, &fetch_torrent(url).await?)?,
         });
     }
-    let metadata = direct::probe(&url).await?;
+    let metadata = direct::probe(url).await?;
     if metadata.name.to_ascii_lowercase().ends_with(".torrent")
         || metadata.content_type.as_deref().is_some_and(|v| {
             v.split(';')
@@ -226,7 +226,7 @@ async fn inspect_http(base: &Path, url: &str) -> Result<Inspection, String> {
         })
     {
         return Ok(Inspection::Bt {
-            torrent: bt::cache(&base, &fetch_torrent(&url).await?)?,
+            torrent: bt::cache(base, &fetch_torrent(url).await?)?,
         });
     }
     Ok(Inspection::Direct {
@@ -326,6 +326,8 @@ pub async fn poll_bt_inspection(
 }
 
 #[tauri::command]
+// Tauri injects the window, app and state alongside the frontend arguments.
+#[allow(clippy::too_many_arguments)]
 pub async fn enqueue_bt(
     window: WebviewWindow,
     app: tauri::AppHandle,

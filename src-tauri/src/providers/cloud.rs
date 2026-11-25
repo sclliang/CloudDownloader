@@ -2,8 +2,10 @@ use super::{crypto, number, text, Download, Session};
 use crate::model::*;
 use reqwest::cookie::CookieStore;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 
+#[derive(Clone)]
 pub struct Entry {
     pub file: DriveFile,
     pub metadata: Value,
@@ -25,7 +27,12 @@ pub fn check(provider: Provider, value: Value) -> Result<Value, String> {
     let valid = match provider {
         Provider::Quark | Provider::Uc => value["code"].as_i64() == Some(0),
         Provider::Pan115 => value["state"].as_bool() == Some(true),
-        Provider::Pan123 => matches!(value["code"].as_i64(), Some(0 | 200)),
+        Provider::Pan123 => matches!(
+            value["code"]
+                .as_i64()
+                .or_else(|| value["code"].as_str().and_then(|code| code.parse().ok())),
+            Some(0 | 200)
+        ),
         Provider::C139 => {
             value["success"].as_bool() != Some(false)
                 && ["0", "0000"].contains(
@@ -44,7 +51,12 @@ pub fn check(provider: Provider, value: Value) -> Result<Value, String> {
     }
     let code = ["errno", "errNo", "code", "resultCode"]
         .iter()
-        .map(|key| text(&value[*key]))
+        .map(|key| {
+            value[*key]
+                .as_i64()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| text(&value[*key]))
+        })
         .find(|v| !v.is_empty())
         .unwrap_or_else(|| "unknown".into());
     let code: String = code
@@ -58,6 +70,13 @@ pub fn check(provider: Provider, value: Value) -> Result<Value, String> {
             "23018" => return Err("该 UC 文件超出游客下载大小上限，请先登录账号".into()),
             "14001" => return Err("UC 分享已失效或提取码有误，请重新解析".into()),
             "41020" => return Err("UC 文件令牌已过期，请重新解析分享".into()),
+            _ => (),
+        }
+    }
+    if provider == Provider::Pan123 {
+        match code.as_str() {
+            "401" | "5112" => return Err("123 登录已过期，请在官方窗口重新登录".into()),
+            "5113" => return Err("123 本月免费下载流量不足，请在官方窗口查看剩余额度".into()),
             _ => (),
         }
     }
@@ -209,11 +228,16 @@ impl Session {
                     .map(|(_, v)| v.to_string())
             })
     }
+    async fn quark_read_json(&self, request: reqwest::RequestBuilder) -> Result<Value, String> {
+        self.json_response(crate::network::send_read_request(request).await)
+            .await
+    }
+
     pub async fn cloud_identity(&self) -> Result<(String, String), String> {
         let (id, name) = match self.provider {
             Provider::Quark => {
                 let value = self
-                    .json(
+                    .quark_read_json(
                         self.transport
                             .client
                             .get(self.endpoint("https://pan.quark.cn/account/info"))
@@ -267,7 +291,7 @@ impl Session {
             Provider::Quark => {
                 let value = check(
                     self.provider,
-                    self.json(
+                    self.quark_read_json(
                         self.transport
                             .client
                             .get(self.endpoint("https://drive-pc.quark.cn/1/clouddrive/file/sort"))
@@ -307,68 +331,78 @@ impl Session {
         }
     }
     pub async fn cloud_find(&self, file: &DriveFile) -> Result<Entry, String> {
-        file_identifier(self.provider, &file.id)?;
-        if parent_id(&file.path, self.provider)? != file.id {
-            return Err("文件标识与路径不一致，请刷新列表".into());
-        }
-        let parent = file
-            .path
-            .rsplit_once('/')
-            .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
-            .ok_or("文件路径无效")?;
-        let mut cursor = None;
-        for page in 1..=200 {
-            let batch = self.cloud_page(parent, page, cursor.as_deref()).await?;
-            if let Some(entry) = batch
-                .entries
-                .into_iter()
-                .find(|entry| entry.file.id == file.id)
-            {
-                return Ok(entry);
+        self.cloud_find_many(std::slice::from_ref(file))
+            .await?
+            .pop()
+            .ok_or("网盘文件不存在或已被移动，请刷新列表".into())
+    }
+
+    pub async fn cloud_find_many(&self, files: &[DriveFile]) -> Result<Vec<Entry>, String> {
+        let mut directories: HashMap<&str, HashSet<&str>> = HashMap::new();
+        for file in files {
+            file_identifier(self.provider, &file.id)?;
+            if parent_id(&file.path, self.provider)? != file.id {
+                return Err("文件标识与路径不一致，请刷新列表".into());
             }
-            cursor = batch.next;
-            if cursor.is_none() {
-                break;
+            let parent = file
+                .path
+                .rsplit_once('/')
+                .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+                .ok_or("文件路径无效")?;
+            directories.entry(parent).or_default().insert(&file.id);
+        }
+        let mut found = HashMap::new();
+        for (parent, mut wanted) in directories {
+            let mut cursor = None;
+            for page in 1..=200 {
+                let batch = self.cloud_page(parent, page, cursor.as_deref()).await?;
+                for entry in batch.entries {
+                    if wanted.remove(entry.file.id.as_str()) {
+                        found.insert(entry.file.path.clone(), entry);
+                    }
+                }
+                cursor = batch.next;
+                if wanted.is_empty() || cursor.is_none() {
+                    break;
+                }
+            }
+            if !wanted.is_empty() {
+                return Err("网盘文件不存在或已被移动，请刷新列表".into());
             }
         }
-        Err("网盘文件不存在或已被移动，请刷新列表".into())
+        files
+            .iter()
+            .map(|file| {
+                found
+                    .get(&file.path)
+                    .cloned()
+                    .ok_or("网盘文件不存在或已被移动，请刷新列表".into())
+            })
+            .collect()
     }
     pub async fn cloud_download(&self, source: &OwnSource) -> Result<Download, String> {
         if self.cloud_identity().await?.0 != source.account_id {
             return Err("网盘账号已切换，请使用创建任务时的账号继续下载".into());
         }
         let fresh = self.cloud_find(&source.file).await?;
+        self.cloud_download_entry(source, fresh).await
+    }
+
+    pub async fn cloud_download_entry(
+        &self,
+        source: &OwnSource,
+        fresh: Entry,
+    ) -> Result<Download, String> {
         if fresh.file.is_dir
+            || fresh.file.id != source.file.id
+            || fresh.file.path != source.file.path
             || fresh.file.size != source.file.size
             || (!source.file.md5.is_empty() && fresh.file.md5 != source.file.md5)
         {
             return Err("源文件已变化，请刷新并新建下载任务".into());
         }
         let url = match self.provider {
-            Provider::Quark => {
-                let value =
-                    check(
-                        self.provider,
-                        self.json(
-                            self.transport
-                                .client
-                                .post(self.endpoint(
-                                    "https://drive-pc.quark.cn/1/clouddrive/file/download",
-                                ))
-                                .query(&[
-                                    ("pr", "ucpro"),
-                                    ("fr", "pc"),
-                                    ("sys", "win32"),
-                                    ("ve", "6.9.7.761"),
-                                ])
-                                .header("Referer", "https://pan.quark.cn/")
-                                .header("User-Agent", crate::quark::DOWNLOAD_AGENT)
-                                .json(&json!({"fids":[fresh.file.id]})),
-                        )
-                        .await?,
-                    )?;
-                text(&value["data"][0]["download_url"])
-            }
+            Provider::Quark => self.transport.download_file(&fresh.file.id, None).await?,
             Provider::Pan115 => return self.pan115_personal_download(&fresh.metadata).await,
             Provider::Pan123 => {
                 let file = ShareFile {

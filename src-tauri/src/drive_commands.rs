@@ -1,9 +1,9 @@
 use crate::{
     model::*,
     providers::baidu_drive::remote_path,
-    session, start_task, trusted,
+    session, start_batch, trusted,
     upload::{self, UploadRecord, UploadView},
-    AppState,
+    AppState, PreparedSource,
 };
 use std::{collections::HashSet, path::PathBuf};
 use tauri::{State, WebviewWindow};
@@ -114,8 +114,8 @@ pub async fn drive_enqueue(
         }
     }
     let mut created = Vec::new();
+    let mut existing = state.store.lock().unwrap().tasks()?;
     for (file, dir) in downloads {
-        let existing = state.store.lock().unwrap().tasks()?;
         if existing.iter().any(|t| {
             t.own
                 .as_ref()
@@ -178,12 +178,13 @@ pub async fn drive_enqueue(
             bt: None,
             upload_speed: 0,
         };
-        created.push(start_task(&app, &state, task, None).await?);
+        existing.push(task.clone());
+        created.push((task, PreparedSource::Baidu(session.clone())));
     }
     if created.is_empty() {
         return Err("所选文件已在任务列表中，或文件夹为空".into());
     }
-    Ok(created)
+    start_batch(&app, &state, created).await
 }
 
 #[tauri::command]

@@ -37,6 +37,7 @@ cargo fmt --manifest-path src-tauri/Cargo.toml --check
 - `src-tauri/src/migration.rs`：旧资料迁移。
 - `src-tauri/src/lib.rs`：任务调度和 Tauri 命令。
 - `src-tauri/src/engine.rs`：aria2 进程、RPC 和传输测试。
+- `src-tauri/src/network.rs`：网盘只读请求的连接重试与证书错误处理。
 - `src/DownloadBox.vue`：统一下载输入、文件预览与 BT 参数界面。
 - `src-tauri/src/bt.rs`、`download_commands.rs`：链接分类、种子校验、磁力元数据和 BT 任务。
 - `src-tauri/src/engine_bt_tests.rs`：真实本地 Tracker／aria2 节点、选择下载及重启续传测试。
@@ -47,6 +48,7 @@ cargo fmt --manifest-path src-tauri/Cargo.toml --check
 - `src-tauri/src/drive_commands.rs`：个人文件和上传任务命令。
 - `src-tauri/src/upload.rs`：分片并发、重试、暂停续传和文件校验。
 - `src-tauri/src/verification.rs`：仅开发构建启用的真实账号验证程序；只上传生成的测试文件。
+- `src-tauri/src/verification_downloads.rs`：按显式参数启动的 123 / 夸克下载验证，使用独立任务数据库与下载目录。
 - `third-party/notices/`：第三方许可资料。
 
 aria2 的固定版本和校验值见 `third-party/notices/README.txt`。本项目未复制或运行 LinkSwift 脚本。

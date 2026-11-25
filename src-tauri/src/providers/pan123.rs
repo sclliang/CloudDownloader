@@ -3,6 +3,7 @@ use super::{
     crypto, number, text, Session,
 };
 use crate::model::*;
+use crate::network::{certificate_error, send_read_request};
 use reqwest::header::{
     ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_RANGE, LOCATION, RANGE, REFERER,
 };
@@ -11,6 +12,7 @@ use url::Url;
 
 const MAX_REDIRECTS: usize = 5;
 const MAX_REDIRECT_BODY: usize = 8192;
+const MAX_DOWNLOAD_NODES: usize = 8;
 
 pub(super) fn validate_node(url: Url) -> Result<Url, String> {
     let host = url.host_str().unwrap_or_default();
@@ -55,6 +57,14 @@ fn node_name(url: &Url) -> String {
 }
 
 impl Session {
+    fn pan123_authorization(&self) -> Result<String, String> {
+        let token = self.authorization.trim().trim_start_matches("Bearer ");
+        if token.is_empty() || token.len() > 16384 || token.chars().any(char::is_control) {
+            return Err("请先在官方窗口登录 123 云盘，再刷新登录状态".into());
+        }
+        Ok(format!("Bearer {token}"))
+    }
+
     async fn pan123_json(&self, request: reqwest::RequestBuilder) -> Result<Value, String> {
         self.json_response(send_read_request(request).await).await
     }
@@ -66,10 +76,7 @@ impl Session {
         query: Vec<(&str, String)>,
         share_download: bool,
     ) -> Result<Value, String> {
-        let token = self.authorization.trim().trim_start_matches("Bearer ");
-        if token.is_empty() || token.len() > 16384 || token.chars().any(char::is_control) {
-            return Err("请先在官方窗口登录 123 云盘，再刷新登录状态".into());
-        }
+        let authorization = self.pan123_authorization()?;
         let (key, value) = crypto::sign123(
             path,
             now() as i64,
@@ -94,7 +101,7 @@ impl Session {
             .pan123_json(
                 request
                     .query(&query)
-                    .header("authorization", format!("Bearer {token}"))
+                    .header("authorization", authorization)
                     .header("auth-key", key)
                     .header("auth-value", value)
                     .header("platform", if share_download { "android" } else { "web" })
@@ -244,14 +251,93 @@ impl Session {
                 json!({"driveId":0,"etag":etag,"fileId":file.id.parse::<u64>().map_err(|_|"123 文件标识无效")?,"s3keyFlag":text(&metadata["S3KeyFlag"]),"type":0,"fileName":file.name,"size":file.size}),
             )
         };
-        let value = self
-            .pan123_request(path, Some(body), vec![], share.is_some())
-            .await?;
-        let address = value["data"]["DownloadURL"]
-            .as_str()
-            .or_else(|| value["data"]["DownloadUrl"].as_str())
-            .ok_or("123 未返回下载链接，请检查下载权益与流量限制")?;
-        self.resolve_pan123_download(address, &etag).await
+        let mut addresses = self.pan123_v2_download(&body, share.is_some()).await?;
+        if addresses.is_empty() {
+            let value = self
+                .pan123_request(path, Some(body), vec![], share.is_some())
+                .await?;
+            addresses = download_addresses(&value);
+        }
+        let mut failure = "123 未返回下载链接，请检查下载权益与流量限制".to_string();
+        for address in addresses {
+            match self.resolve_pan123_download(&address, &etag).await {
+                Ok(url) => return Ok(url),
+                Err(error) => failure = error,
+            }
+        }
+        Err(failure)
+    }
+
+    async fn pan123_v2_download(&self, body: &Value, share: bool) -> Result<Vec<String>, String> {
+        let mut body = body.clone();
+        if share {
+            if let Some(object) = body.as_object_mut() {
+                if let Some(key) = object.remove("S3KeyFlag") {
+                    object.insert("S3keyFlag".into(), key);
+                }
+                if let Some(id) = object.get("FileID").and_then(Value::as_str) {
+                    let id = id.parse::<u64>().map_err(|_| "123 文件标识无效")?;
+                    object.insert("FileID".into(), json!(id));
+                }
+            }
+        }
+        let path = if share {
+            "/api/v2/share/download/info"
+        } else {
+            "/api/v2/file/download_info"
+        };
+        let response = send_read_request(
+            self.no_redirect()?
+                .post(self.endpoint(&format!("https://api.123pan.cn{path}")))
+                .header("Authorization", self.pan123_authorization()?)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) 123pan/3.2.3 Chrome/108.0.5359.215 Electron/22.3.27 Safari/537.36 WebView/1.0")
+                .header("Platform", "web")
+                .header("Platform_os", "123pan/v323(Windows10.0.26200)")
+                .header("App-Version", "323")
+                .header("LoginUuid", &self.device_id)
+                .header("Referer", "https://yun.123pan.cn/")
+                .json(&body),
+        ).await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error)
+                if !certificate_error(&error) && (error.is_connect() || error.is_timeout()) =>
+            {
+                return Ok(Vec::new());
+            }
+            Err(_) => return Err("连接 123 新版下载接口失败".into()),
+        };
+        if matches!(response.status().as_u16(), 404 | 405 | 501)
+            || response.status().is_server_error()
+        {
+            return Ok(Vec::new());
+        }
+        let status = response.status();
+        let value = self.json_response(Ok(response)).await?;
+        #[cfg(debug_assertions)]
+        crate::verification::download_diagnostic(
+            if share {
+                "pan123-v2-share"
+            } else {
+                "pan123-v2-personal"
+            },
+            json!({"http":status.as_u16(),"hasCode":value.get("code").is_some(),
+                "code":value["code"].as_i64(),
+                "keys":value.as_object().map(|v|v.keys().collect::<Vec<_>>()),
+                "dataKeys":value["data"].as_object().map(|v|v.keys().collect::<Vec<_>>()),
+                "addressCount":download_addresses(&value).len()}),
+        );
+        // New desktop responses can omit code on success. Explicit business
+        // errors must still stop here instead of falling back to another API.
+        let value = if value.get("code").is_some_and(|code| !code.is_null()) {
+            check(self.provider, value)?
+        } else {
+            value
+        };
+        if !status.is_success() {
+            return Err(format!("123 新版下载接口返回 HTTP {}", status.as_u16()));
+        }
+        Ok(download_addresses(&value))
     }
 
     async fn resolve_pan123_download(&self, address: &str, etag: &str) -> Result<String, String> {
@@ -322,44 +408,34 @@ impl Session {
     }
 }
 
-fn certificate_error(error: &reqwest::Error) -> bool {
-    let mut source = std::error::Error::source(error);
-    while let Some(cause) = source {
-        if cause
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("certificate")
+fn download_addresses(value: &Value) -> Vec<String> {
+    let data = &value["data"];
+    let mut addresses = Vec::new();
+    for key in ["DownloadURL", "DownloadUrl"] {
+        if let Some(address) = data[key]
+            .as_str()
+            .filter(|address| !address.trim().is_empty())
         {
-            return true;
+            addresses.push(address.to_owned());
         }
-        source = cause.source();
     }
-    false
-}
-
-// The two POST endpoints used here only return download metadata. HTTP responses,
-// including permission and quota errors, are handled by the caller without retry.
-async fn send_read_request(
-    request: reqwest::RequestBuilder,
-) -> Result<reqwest::Response, reqwest::Error> {
-    for attempt in 0..2 {
-        let Some(replay) = request.try_clone() else {
-            break;
-        };
-        match replay.send().await {
-            Ok(response) => return Ok(response),
-            Err(error)
-                if certificate_error(&error)
-                    || !(error.is_request() || error.is_connect() || error.is_timeout()) =>
-            {
-                return Err(error)
-            }
-            Err(_) => {
-                tokio::time::sleep(std::time::Duration::from_millis(300 * (attempt + 1))).await
+    if let (Some(nodes), Some(path)) = (
+        data["dispatchList"].as_array(),
+        data["downloadPath"].as_str(),
+    ) {
+        if !path.is_empty() {
+            for node in nodes.iter().take(MAX_DOWNLOAD_NODES) {
+                if let Some(prefix) = node["prefix"].as_str().filter(|prefix| !prefix.is_empty()) {
+                    let address = format!("{prefix}{path}");
+                    if !addresses.contains(&address) {
+                        addresses.push(address);
+                    }
+                }
             }
         }
     }
-    request.send().await
+    addresses.truncate(MAX_DOWNLOAD_NODES);
+    addresses
 }
 
 async fn json_redirect(

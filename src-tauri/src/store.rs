@@ -42,6 +42,13 @@ impl Store {
         self.0.execute("INSERT INTO tasks(id,payload) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", params![task.id,payload]).map_err(|e| e.to_string())?;
         Ok(())
     }
+    pub fn save_batch<'a>(&self, tasks: impl IntoIterator<Item = &'a Task>) -> Result<(), String> {
+        let transaction = self.0.unchecked_transaction().map_err(|e| e.to_string())?;
+        for task in tasks {
+            self.save(task)?;
+        }
+        transaction.commit().map_err(|e| e.to_string())
+    }
     pub fn remove(&self, id: &str) -> Result<(), String> {
         self.0
             .execute("DELETE FROM tasks WHERE id=?1", [id])
@@ -111,5 +118,42 @@ impl Store {
         let payload = serde_json::to_string(record).map_err(|e| e.to_string())?;
         self.0.execute(&format!("INSERT INTO {table}(id,payload) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload"), params![id, payload]).map_err(|e| e.to_string())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reserving_a_batch_rolls_back_all_tasks_when_one_write_fails() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let task = |id: &str| -> Task {
+            serde_json::from_value(json!({
+                "id": id,
+                "name": "sample.bin",
+                "size": 4,
+                "completed": 0,
+                "speed": 0,
+                "status": "resolving",
+                "error": "",
+                "directory": "C:/fixture",
+                "createdAt": 0,
+                "gid": null,
+                "share": {"provider":"quark","id":"fixture","passcode":""},
+                "file": {"id":id,"name":"sample.bin","size":4,"isDir":false,"parentId":"0"}
+            }))
+            .unwrap()
+        };
+        let mut original = task("existing");
+        original.status = "paused".into();
+        store.save(&original).unwrap();
+        store.0.execute_batch("CREATE TRIGGER reject_fixture BEFORE INSERT ON tasks WHEN NEW.id = 'reject' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;").unwrap();
+        let batch = [task("existing"), task("new"), task("reject")];
+        assert!(store.save_batch(batch.iter()).is_err());
+        assert_eq!(store.tasks().unwrap().len(), 1);
+        assert_eq!(store.task("existing").unwrap().unwrap().status, "paused");
+        assert!(store.task("new").unwrap().is_none());
     }
 }

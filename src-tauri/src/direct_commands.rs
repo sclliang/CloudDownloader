@@ -77,5 +77,11 @@ pub async fn enqueue_direct(
         bt: None,
         upload_speed: 0,
     };
-    start_task(&app, &state, task, Some(metadata)).await
+    start_task(
+        &app,
+        &state,
+        task,
+        Some(crate::PreparedSource::Direct(metadata)),
+    )
+    .await
 }

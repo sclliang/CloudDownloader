@@ -75,7 +75,7 @@ async fn wait_status(rpc: &crate::Rpc, gid: &str, expected: &str) {
 }
 
 #[test]
-fn pan123_engine_retry_is_bounded_and_preserves_user_pauses_and_permanent_failures() {
+fn cloud_engine_retry_is_bounded_and_preserves_user_pauses_and_permanent_failures() {
     let mut task = record(Path::new("."), "test", "error", "https://example.test/");
     let detail = "SSL/TLS handshake failure: Error: connection closed";
     assert_eq!(task.connection_retries, 0);
@@ -108,6 +108,15 @@ fn pan123_engine_retry_is_bounded_and_preserves_user_pauses_and_permanent_failur
         assert_eq!(task.status, "waiting");
         assert!(task.gid.is_none());
     }
+    assert!(!super::queue_connection_retry(
+        &mut task, "active", "1", detail
+    ));
+    task.share.provider = crate::Provider::Quark;
+    task.connection_retries = 0;
+    assert!(super::queue_connection_retry(
+        &mut task, "active", "1", detail
+    ));
+    task.share.provider = crate::Provider::C139;
     assert!(!super::queue_connection_retry(
         &mut task, "active", "1", detail
     ));

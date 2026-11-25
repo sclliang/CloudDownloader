@@ -65,10 +65,10 @@ fn delete_local_files(store: &Store, task: &Task) -> Result<(), String> {
     }
     // Remove the output first: if it is locked, preserve its resume information.
     for file in &files {
-        match fs::remove_file(&file) {
+        match fs::remove_file(file) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(cleanup_error(&file, error)),
+            Err(error) => return Err(cleanup_error(file, error)),
         }
     }
     if task.bt.is_some() {

@@ -103,8 +103,10 @@ pub(super) fn queue_connection_retry(
     code: &str,
     detail: &str,
 ) -> bool {
-    if task.share.provider != crate::Provider::Pan123
-        || task.direct.is_some()
+    if !matches!(
+        task.share.provider,
+        crate::Provider::Pan123 | crate::Provider::Quark
+    ) || task.direct.is_some()
         || task.bt.is_some()
         || !matches!(previous_status, "active" | "waiting")
         || task.connection_retries >= 2

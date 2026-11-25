@@ -246,12 +246,15 @@ impl Rpc {
         task: &crate::Task,
         download: &crate::providers::Download,
     ) -> Result<String, String> {
-        let options =
-            if task.connection_retries > 0 && task.share.provider == crate::Provider::Pan123 {
-                json!({"split":"1", "max-connection-per-server":"1"})
-            } else {
-                json!({})
-            };
+        let options = if task.connection_retries > 0
+            && matches!(
+                task.share.provider,
+                crate::Provider::Pan123 | crate::Provider::Quark
+            ) {
+            json!({"split":"1", "max-connection-per-server":"1"})
+        } else {
+            json!({})
+        };
         self.add_with_options(
             &download.url,
             &task.directory,

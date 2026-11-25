@@ -27,12 +27,12 @@
 
 ## 下载
 
-最新版本 **0.5.8** 修复了 123 云盘个人文件和外部分享的下载中断问题，并支持多选任务后批量暂停、继续或移除。
+最新版本 **0.5.9** 增加 123 云盘新版下载接口兼容，统一夸克下载凭据与重试，并减少批量下载准备时的重复请求。
 
 | Windows 安装版 · 推荐                 | 便携版                                 |
 | :------------------------------------ | :------------------------------------- |
 | 自动创建快捷方式，适合日常使用。      | 解压即可运行，保留完整目录结构。       |
-| **[↓ 下载 v0.5.8 安装包][installer]** | **[↓ 下载 v0.5.8 便携 ZIP][portable]** |
+| **[↓ 下载 v0.5.9 安装包][installer]** | **[↓ 下载 v0.5.9 便携 ZIP][portable]** |
 
 [全部版本与更新说明][releases] · [SHA-256 校验文件][checksums]
 
@@ -135,15 +135,15 @@ npm run tauri dev -- --no-watch
 
 ## 文档与致谢
 
-[使用指南](docs/usage.md) · [开发文档](docs/development.md) · [验证记录](VERIFICATION.md) · [更新说明](docs/release-0.5.8.md) · [第三方许可](third-party/notices/)
+[使用指南](docs/usage.md) · [开发文档](docs/development.md) · [验证记录](VERIFICATION.md) · [更新说明](docs/release-0.5.9.md) · [第三方许可](third-party/notices/)
 
 界面布局与蓝白配色参考 [Motrix](https://github.com/agalwood/Motrix)，保留本项目的统一下载入口与多网盘工作区。
 
-网盘协议流程参考 [CYQawa/YunX](https://github.com/CYQawa/YunX) 与 [YunX-Desktop](https://github.com/tidain/YunX-Desktop)，以 Rust 实现适配器。参考版本和许可出处见[协议资料](third-party/notices/cloud-protocol-sources.txt)。
+网盘协议流程参考 [CYQawa/YunX](https://github.com/CYQawa/YunX)、[YunX-Desktop](https://github.com/tidain/YunX-Desktop) 与 [LinkSwift](https://github.com/hmjz100/LinkSwift)，以 Rust 实现适配器。参考版本和许可出处见[协议资料](third-party/notices/cloud-protocol-sources.txt)。
 
 <p align="center"><sub>sixunited · 作者 <a href="https://github.com/sclliang">sclliang</a></sub></p>
 
-[installer]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.8/CloudDownloader_0.5.8_x64-setup.exe
-[portable]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.8/CloudDownloader-0.5.8-win-x64.zip
-[checksums]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.8/SHA256SUMS-0.5.8.txt
+[installer]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.9/CloudDownloader_0.5.9_x64-setup.exe
+[portable]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.9/CloudDownloader-0.5.9-win-x64.zip
+[checksums]: https://github.com/sclliang/CloudDownloader/releases/download/v0.5.9/SHA256SUMS-0.5.9.txt
 [releases]: https://github.com/sclliang/CloudDownloader/releases

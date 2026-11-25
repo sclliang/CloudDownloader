@@ -109,7 +109,27 @@ impl Session {
     pub fn download_descriptor(&self, url: String) -> Result<Download, String> {
         let parsed = validate_download(self.provider, &url)?;
         let mut headers = vec![format!("Referer: {}/", self.provider.origin())];
-        if let Some(cookies) = matches!(self.provider, Provider::Quark | Provider::Baidu)
+        if self.provider == Provider::Quark {
+            let cookies = ["__pugs", "__puus", "__pus"]
+                .iter()
+                .filter_map(|key| {
+                    self.cookie_value_raw(
+                        &[
+                            parsed.as_str(),
+                            "https://drive-pc.quark.cn/",
+                            "https://pan.quark.cn/",
+                        ],
+                        key,
+                    )
+                    .map(|value| format!("{key}={value}"))
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            if !cookies.is_empty() {
+                headers.push(format!("Cookie: {cookies}"));
+            }
+        }
+        if let Some(cookies) = (self.provider == Provider::Baidu)
             .then(|| {
                 self.transport
                     .jar
@@ -200,6 +220,13 @@ pub fn number(value: &Value) -> u64 {
 }
 
 pub fn parse_share(input: &str, code: &str) -> Result<ShareLink, String> {
+    static LANZOU_CODE_PATTERN: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            regex::Regex::new(
+                r"(?:提取码|提取碼|密码|密碼|访问码)\s*[:：]?\s*([^\s，。；）)\]]{1,64})",
+            )
+            .unwrap()
+        });
     let pattern = regex::Regex::new(r#"https?://[^\s<>\"，。；）)\]]+"#).unwrap();
     let code_pattern =
         regex::Regex::new(r"(?:提取码|提取碼|密码|密碼|访问码)\s*[:：]?\s*([A-Za-z0-9]{4,8})\b")
@@ -303,13 +330,10 @@ pub fn parse_share(input: &str, code: &str) -> Result<ShareLink, String> {
                 .unwrap_or_default();
         }
         if provider == Provider::Lanzou && passcode.is_empty() {
-            passcode = regex::Regex::new(
-                r"(?:提取码|提取碼|密码|密碼|访问码)\s*[:：]?\s*([^\s，。；）)\]]{1,64})",
-            )
-            .unwrap()
-            .captures(input)
-            .map(|c| c[1].into())
-            .unwrap_or_default();
+            passcode = LANZOU_CODE_PATTERN
+                .captures(input)
+                .map(|c| c[1].into())
+                .unwrap_or_default();
         }
         if !passcode.is_empty()
             && provider != Provider::Lanzou
@@ -369,14 +393,14 @@ pub(super) fn validate_download(provider: Provider, address: &str) -> Result<url
             "qiniuio.com",
         ],
     };
+    let host = url.host_str().unwrap_or_default();
+    let known_host = domains.iter().any(|d| host_matches(host, d))
+        || (provider == Provider::Lanzou && lanzou_host(host));
     if url.scheme() != "https"
         || !url.username().is_empty()
         || url.password().is_some()
         || url.port().is_some()
-        || !(provider == Provider::Lanzou && lanzou_host(url.host_str().unwrap_or_default()))
-            && !domains
-                .iter()
-                .any(|d| host_matches(url.host_str().unwrap_or_default(), d))
+        || !known_host
     {
         return Err(format!(
             "{}返回了尚未识别的下载域名，请更新适配器",
